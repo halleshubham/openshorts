@@ -49,13 +49,27 @@ def _whisper_transcribe(model, audio_path, word_timestamps=True):
     the two-pass fix was introduced.
     """
     sample_30s = _extract_30s_audio(audio_path)
-    # detect_language returns a list of (language, probability) pairs ranked by
-    # confidence; take the top result.
     detected = model.detect_language(sample_30s)
-    lang, lang_prob = detected[0]
-    seed = _SCRIPT_SEED.get(lang)
 
-    print(f"   Detected language '{lang}' ({lang_prob:.2f})"
+    # faster-whisper API varies by version:
+    #   < 1.x  → (str, float)          single (lang, prob) tuple
+    #   1.x    → list of str           ['hi', 'en', ...] ranked by confidence
+    #   some   → list of (str, float)  [('hi', 0.99), ...] ranked by confidence
+    lang_prob = None
+    if isinstance(detected, list) and detected:
+        head = detected[0]
+        if isinstance(head, (list, tuple)) and len(head) >= 2:
+            lang, lang_prob = str(head[0]), float(head[1])
+        else:
+            lang = str(head)
+    elif isinstance(detected, tuple) and len(detected) == 2 and isinstance(detected[0], str):
+        lang, lang_prob = detected
+    else:
+        lang = str(detected)
+
+    seed = _SCRIPT_SEED.get(lang)
+    prob_str = f" ({lang_prob:.2f})" if lang_prob is not None else ""
+    print(f"   Detected language '{lang}'{prob_str}"
           f"{' — using script seed prompt' if seed else ''}")
 
     # Pass the file path (not a numpy array) so faster-whisper streams audio
