@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Header, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from s3_uploader import upload_job_artifacts, list_all_clips, upload_actor_to_s3, list_actor_gallery, upload_video_to_gallery, list_video_gallery
 
@@ -406,15 +406,45 @@ async def process_endpoint(
 
 @app.get("/api/status/{job_id}")
 async def get_status(job_id: str):
-    if job_id not in jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
-    
-    job = jobs[job_id]
-    return {
-        "status": job['status'],
-        "logs": job['logs'],
-        "result": job.get('result')
-    }
+    # 1. Live in-memory job (normal path)
+    if job_id in jobs:
+        job = jobs[job_id]
+        return {"status": job['status'], "logs": job['logs'], "result": job.get('result')}
+
+    # 2. Server restarted — try to recover completed results from disk
+    output_dir = os.path.join(OUTPUT_DIR, job_id)
+    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+    if json_files:
+        try:
+            with open(json_files[0]) as f:
+                data = json.load(f)
+            clips = data.get('shorts', [])
+            if clips:
+                recovered = {
+                    "status": "completed",
+                    "logs": ["[Recovered from disk after server restart]"],
+                    "result": {
+                        "clips": clips,
+                        "transcript": data.get('transcript'),
+                        "language": data.get('transcript', {}).get('language', 'en'),
+                        "cost_analysis": data.get('cost_analysis'),
+                    }
+                }
+                # Re-register in memory so subsequent requests are instant
+                jobs[job_id] = {
+                    "status": "completed",
+                    "logs": recovered["logs"],
+                    "result": recovered["result"],
+                }
+                return recovered
+        except Exception:
+            pass
+
+    # 3. Truly not found — use JSON body so frontend can read detail
+    return JSONResponse(
+        status_code=404,
+        content={"status": "not_found", "detail": "Job not found. It may have been purged."}
+    )
 
 from editor import VideoEditor
 from subtitles import generate_srt, burn_subtitles, generate_srt_from_video

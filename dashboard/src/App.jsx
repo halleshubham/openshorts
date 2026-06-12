@@ -130,7 +130,12 @@ const SESSION_MAX_AGE = 3600000; // 1 hour (matches server job retention)
 // Mock polling function
 const pollJob = async (jobId) => {
   const res = await fetch(getApiUrl(`/api/status/${jobId}`));
-  if (!res.ok) throw new Error('Status check failed');
+  if (!res.ok) {
+    const err = new Error('Status check failed');
+    err.httpStatus = res.status;
+    try { const body = await res.json(); err.detail = body.detail; } catch (_) {}
+    throw err;
+  }
   return res.json();
 };
 
@@ -284,31 +289,41 @@ function App() {
 
   useEffect(() => {
     let interval;
+    let consecutiveErrors = 0;
+    const MAX_ERRORS = 3;
+
     if ((status === 'processing' || status === 'completed') && jobId) {
       interval = setInterval(async () => {
         try {
           const data = await pollJob(jobId);
-          console.log("Job status:", data);
+          consecutiveErrors = 0;
 
-          // Update results if available (real-time)
-          if (data.result) {
-            setResults(data.result);
-          }
+          if (data.result) setResults(data.result);
 
           if (data.status === 'completed') {
             setStatus('complete');
             clearInterval(interval);
           } else if (data.status === 'failed') {
             setStatus('error');
-            const errorMsg = data.error || (data.logs && data.logs.length > 0 ? data.logs[data.logs.length - 1] : "Process failed");
-            setLogs(prev => [...prev, "Error: " + errorMsg]);
+            const errorMsg = data.error || (data.logs?.length > 0 ? data.logs[data.logs.length - 1] : 'Process failed');
+            setLogs(prev => [...prev, 'Error: ' + errorMsg]);
             clearInterval(interval);
           } else {
-            // Update logs if available
             if (data.logs) setLogs(data.logs);
           }
         } catch (e) {
-          console.error("Polling error", e);
+          consecutiveErrors++;
+          console.error('Polling error', e);
+          const isGone = e.httpStatus === 404;
+          if (isGone || consecutiveErrors >= MAX_ERRORS) {
+            const msg = isGone
+              ? (e.detail || 'Job not found — server may have restarted.')
+              : 'Lost connection to server after multiple retries.';
+            setStatus('error');
+            setLogs(prev => [...prev, msg]);
+            clearInterval(interval);
+            localStorage.removeItem(SESSION_KEY);
+          }
         }
       }, 2000);
     }
@@ -328,6 +343,10 @@ function App() {
 
   // Batch polling — single long-lived interval reads from ref to avoid stale-closure resets
   useEffect(() => {
+    // Track consecutive error counts per jobId
+    const errorCounts = {};
+    const MAX_ERRORS = 3;
+
     const interval = setInterval(async () => {
       const active = batchJobsRef.current.filter(j => j.status === 'processing' && j.jobId);
       if (active.length === 0) return;
@@ -335,6 +354,8 @@ function App() {
       await Promise.allSettled(active.map(async (bj) => {
         try {
           const data = await pollJob(bj.jobId);
+          errorCounts[bj.jobId] = 0;
+
           if (data.status === 'completed') {
             setBatchJobs(prev => prev.map(j => j.id === bj.id
               ? { ...j, status: 'complete', results: data.result, logs: data.logs || j.logs }
@@ -346,7 +367,18 @@ function App() {
           } else if (data.logs) {
             setBatchJobs(prev => prev.map(j => j.id === bj.id ? { ...j, logs: data.logs } : j));
           }
-        } catch (_) {}
+        } catch (e) {
+          errorCounts[bj.jobId] = (errorCounts[bj.jobId] || 0) + 1;
+          const isGone = e.httpStatus === 404;
+          if (isGone || errorCounts[bj.jobId] >= MAX_ERRORS) {
+            const errMsg = isGone
+              ? (e.detail || 'Job not found — server may have restarted.')
+              : 'Lost connection after multiple retries.';
+            setBatchJobs(prev => prev.map(j => j.id === bj.id
+              ? { ...j, status: 'error', error: errMsg }
+              : j));
+          }
+        }
       }));
     }, 2500);
 
