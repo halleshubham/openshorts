@@ -27,16 +27,12 @@ _SCRIPT_SEED = {
 }
 
 
-def _extract_30s_audio(audio_path):
-    """Return the first 30 s of audio as a 16 kHz mono float32 numpy array.
-
-    Uses ffmpeg to read only 30 seconds so we never decode the full video
-    just for language detection.
-    """
+def _extract_audio_window(audio_path, offset_s=0, duration_s=30):
+    """Extract a window of audio as a 16 kHz mono float32 numpy array."""
     import numpy as np
     cmd = [
-        'ffmpeg', '-y', '-i', audio_path,
-        '-t', '30',
+        'ffmpeg', '-y', '-ss', str(offset_s), '-i', audio_path,
+        '-t', str(duration_s),
         '-ar', '16000', '-ac', '1', '-f', 'f32le',
         'pipe:1',
     ]
@@ -44,32 +40,69 @@ def _extract_30s_audio(audio_path):
     return np.frombuffer(result.stdout, dtype=np.float32)
 
 
+def _video_duration(audio_path):
+    """Return video duration in seconds via ffprobe, or None on failure."""
+    cmd = [
+        'ffprobe', '-v', 'quiet',
+        '-show_entries', 'format=duration',
+        '-of', 'default=noprint_wrappers=1:nokey=1',
+        audio_path,
+    ]
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        return float(result.stdout.strip())
+    except (ValueError, AttributeError):
+        return None
+
+
+def _detect_language_robust(model, audio_path):
+    """Detect language by sampling up to 3 windows and taking a majority vote.
+
+    Sampling only the first 30 s is unreliable for closely related languages
+    (e.g. Hindi vs Marathi) because the opening may not be representative.
+    """
+    duration = _video_duration(audio_path) or 60
+    offsets = [0]
+    if duration > 90:
+        offsets.append(int(duration / 3))
+    if duration > 180:
+        offsets.append(int(2 * duration / 3))
+
+    votes = {}
+    best_prob = {}
+    for offset in offsets:
+        sample = _extract_audio_window(audio_path, offset_s=offset, duration_s=30)
+        if len(sample) < 4000:   # < 0.25 s of audio — skip empty windows
+            continue
+        detected = model.detect_language(sample)
+        if isinstance(detected, tuple) and len(detected) >= 1:
+            lang = str(detected[0])
+            prob = float(detected[1]) if len(detected) >= 2 else 0.0
+        elif isinstance(detected, list) and detected:
+            head = detected[0]
+            if isinstance(head, (list, tuple)) and len(head) >= 2:
+                lang, prob = str(head[0]), float(head[1])
+            else:
+                lang, prob = str(head), 0.0
+        else:
+            continue
+        votes[lang] = votes.get(lang, 0) + 1
+        best_prob[lang] = max(best_prob.get(lang, 0.0), prob)
+
+    if not votes:
+        return 'en', None
+    # Majority vote; break ties with highest probability
+    lang = max(votes, key=lambda l: (votes[l], best_prob.get(l, 0.0)))
+    return lang, best_prob.get(lang)
+
+
 def _whisper_transcribe(model, audio_path, word_timestamps=True):
     """
-    Detect language from the first 30 seconds only (instant for any length),
-    then pass the FILE PATH to the full transcription so Whisper streams the
-    audio and starts yielding segments immediately — same behaviour as before
-    the two-pass fix was introduced.
+    Detect language by sampling multiple windows (majority vote), then pass
+    the FILE PATH to the full transcription so faster-whisper streams audio
+    and the generator starts yielding segments immediately.
     """
-    sample_30s = _extract_30s_audio(audio_path)
-    detected = model.detect_language(sample_30s)
-
-    # faster-whisper 1.2.x returns a 3-tuple: (top_lang, top_prob, all_results_list)
-    # Older versions returned a 2-tuple (lang, prob) or a list.
-    lang_prob = None
-    if isinstance(detected, tuple) and len(detected) >= 1:
-        lang = str(detected[0])
-        if len(detected) >= 2:
-            lang_prob = float(detected[1])
-    elif isinstance(detected, list) and detected:
-        head = detected[0]
-        if isinstance(head, (list, tuple)) and len(head) >= 2:
-            lang, lang_prob = str(head[0]), float(head[1])
-        else:
-            lang = str(head)
-    else:
-        lang = str(detected)
-
+    lang, lang_prob = _detect_language_robust(model, audio_path)
     seed = _SCRIPT_SEED.get(lang)
     prob_str = f" ({lang_prob:.2f})" if lang_prob is not None else ""
     print(f"   Detected language '{lang}'{prob_str}"
