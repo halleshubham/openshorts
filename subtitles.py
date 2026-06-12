@@ -51,19 +51,19 @@ def _whisper_transcribe(model, audio_path, word_timestamps=True):
     sample_30s = _extract_30s_audio(audio_path)
     detected = model.detect_language(sample_30s)
 
-    # faster-whisper API varies by version:
-    #   < 1.x  → (str, float)          single (lang, prob) tuple
-    #   1.x    → list of str           ['hi', 'en', ...] ranked by confidence
-    #   some   → list of (str, float)  [('hi', 0.99), ...] ranked by confidence
+    # faster-whisper 1.2.x returns a 3-tuple: (top_lang, top_prob, all_results_list)
+    # Older versions returned a 2-tuple (lang, prob) or a list.
     lang_prob = None
-    if isinstance(detected, list) and detected:
+    if isinstance(detected, tuple) and len(detected) >= 1:
+        lang = str(detected[0])
+        if len(detected) >= 2:
+            lang_prob = float(detected[1])
+    elif isinstance(detected, list) and detected:
         head = detected[0]
         if isinstance(head, (list, tuple)) and len(head) >= 2:
             lang, lang_prob = str(head[0]), float(head[1])
         else:
             lang = str(head)
-    elif isinstance(detected, tuple) and len(detected) == 2 and isinstance(detected[0], str):
-        lang, lang_prob = detected
     else:
         lang = str(detected)
 
