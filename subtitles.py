@@ -6,21 +6,24 @@ import subprocess
 # in the correct Unicode block (e.g. Devanagari for hi/mr) instead of
 # hallucinating phonetically-similar Arabic or Latin codepoints.
 _SCRIPT_SEED = {
-    'hi': 'हिंदी',
-    'mr': 'मराठी',
-    'ne': 'नेपाली',
-    'sa': 'संस्कृत',
-    'ar': 'العربية',
-    'fa': 'فارسی',
-    'ur': 'اردو',
-    'ta': 'தமிழ்',
-    'te': 'తెలుగు',
-    'kn': 'ಕನ್ನಡ',
-    'ml': 'മലയാളം',
-    'th': 'ภาษาไทย',
-    'zh': '中文',
-    'ja': '日本語',
-    'ko': '한국어',
+    # Longer prompts are intentional: Whisper's decoder uses the prompt as prior
+    # context, so more Devanagari/native-script tokens = stronger script anchoring.
+    # Single words are not enough for Hindi/Urdu disambiguation.
+    'hi': 'नमस्ते। यह वीडियो हिंदी भाषा में है। आज हम हिंदी में बात करेंगे।',
+    'mr': 'नमस्कार। हे व्हिडिओ मराठी भाषेत आहे। आज आपण मराठीत बोलणार आहोत।',
+    'ne': 'नमस्ते। यो भिडियो नेपाली भाषामा छ।',
+    'sa': 'नमस्ते। एतत् संस्कृतभाषायां वीडियो अस्ति।',
+    'ar': 'مرحباً. هذا الفيديو باللغة العربية.',
+    'fa': 'سلام. این ویدیو به زبان فارسی است.',
+    'ur': 'السلام علیکم۔ یہ ویڈیو اردو زبان میں ہے۔',
+    'ta': 'வணக்கம். இந்த வீடியோ தமிழ் மொழியில் உள்ளது.',
+    'te': 'నమస్కారం. ఈ వీడియో తెలుగు భాషలో ఉంది.',
+    'kn': 'ನಮಸ್ಕಾರ. ಈ ವೀಡಿಯೋ ಕನ್ನಡ ಭಾಷೆಯಲ್ಲಿದೆ.',
+    'ml': 'നമസ്കാരം. ഈ വീഡിയോ മലയാളത്തിലാണ്.',
+    'th': 'สวัสดี. วิดีโอนี้เป็นภาษาไทย.',
+    'zh': '你好。这个视频是用中文制作的。',
+    'ja': 'こんにちは。この動画は日本語です。',
+    'ko': '안녕하세요. 이 영상은 한국어로 되어 있습니다.',
 }
 
 
