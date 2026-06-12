@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { ChevronDown, Loader2, CheckCircle2, AlertCircle, Clock, FileVideo, Youtube, Sparkles } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { ChevronDown, Loader2, CheckCircle2, AlertCircle, Clock, FileVideo, Youtube, Sparkles, Terminal } from 'lucide-react';
 import ResultCard from './ResultCard';
 
 function StatusBadge({ status }) {
@@ -26,77 +26,120 @@ function StatusBadge({ status }) {
 }
 
 export default function BatchJobPanel({ job, uploadPostKey, uploadUserId, geminiApiKey, elevenLabsKey, onDeleteClip }) {
-    const [expanded, setExpanded] = useState(false);
-    const [logsExpanded, setLogsExpanded] = useState(false);
+    const [clipsExpanded, setClipsExpanded] = useState(false);
+    // Logs open by default while processing, collapsed once done
+    const [logsOpen, setLogsOpen] = useState(job.status === 'processing' || job.status === 'submitting');
+    const logsEndRef = useRef(null);
+    const prevStatusRef = useRef(job.status);
 
     const clipCount = job.results?.clips?.length ?? 0;
-    const lastLog = job.logs?.length > 0 ? job.logs[job.logs.length - 1] : null;
     const mediaIcon = job.media?.type === 'url'
         ? <Youtube size={14} className="text-red-400 shrink-0" />
         : <FileVideo size={14} className="text-blue-400 shrink-0" />;
 
+    // Auto-open logs when job starts processing
+    useEffect(() => {
+        if (prevStatusRef.current !== job.status) {
+            if (job.status === 'processing') setLogsOpen(true);
+            prevStatusRef.current = job.status;
+        }
+    }, [job.status]);
+
+    // Auto-scroll to bottom whenever new logs arrive
+    useEffect(() => {
+        if (logsOpen && logsEndRef.current) {
+            logsEndRef.current.scrollIntoView({ behavior: 'smooth' });
+        }
+    }, [job.logs, logsOpen]);
+
+    const isActive = job.status === 'processing' || job.status === 'submitting';
+
     return (
         <div className="bg-surface border border-white/5 rounded-2xl overflow-hidden animate-[fadeIn_0.4s_ease-out]">
-            {/* Header row */}
-            <div
-                className="flex items-center gap-3 p-4 cursor-pointer hover:bg-white/3 transition-colors select-none"
-                onClick={() => job.status === 'complete' && setExpanded(e => !e)}
-            >
+            {/* ── Header row ── */}
+            <div className="flex items-center gap-3 px-4 py-3 border-b border-white/5">
                 {mediaIcon}
-                <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-white truncate" title={job.media?.name}>
-                        {job.media?.name || 'Video'}
-                    </p>
-                    {lastLog && job.status === 'processing' && (
-                        <p className="text-[10px] text-zinc-500 truncate mt-0.5">{lastLog}</p>
-                    )}
-                    {job.error && (
-                        <p className="text-[10px] text-red-400 truncate mt-0.5">{job.error}</p>
-                    )}
-                </div>
+                <p className="flex-1 text-sm font-medium text-white truncate min-w-0" title={job.media?.name}>
+                    {job.media?.name || 'Video'}
+                </p>
 
                 <StatusBadge status={job.status} />
 
-                {job.status === 'complete' && (
-                    <span className="text-[10px] bg-white/10 text-white px-1.5 py-0.5 rounded-full shrink-0">
+                {job.status === 'complete' && clipCount > 0 && (
+                    <button
+                        onClick={() => setClipsExpanded(e => !e)}
+                        className="inline-flex items-center gap-1.5 text-[10px] bg-white/10 hover:bg-white/15 text-white px-2 py-0.5 rounded-full transition-colors"
+                    >
                         {clipCount} clips
-                    </span>
-                )}
-
-                {job.status === 'complete' && (
-                    <ChevronDown
-                        size={16}
-                        className={`text-zinc-500 shrink-0 transition-transform duration-200 ${expanded ? 'rotate-180' : ''}`}
-                    />
-                )}
-
-                {/* Inline progress ring for processing */}
-                {job.status === 'processing' && (
-                    <div className="w-4 h-4 border-2 border-zinc-800 border-t-primary rounded-full animate-spin shrink-0" />
+                        <ChevronDown size={10} className={`transition-transform duration-200 ${clipsExpanded ? 'rotate-180' : ''}`} />
+                    </button>
                 )}
             </div>
 
-            {/* Expandable logs strip (visible during processing) */}
-            {job.status === 'processing' && job.logs?.length > 0 && (
-                <div className="px-4 pb-3">
-                    <button
-                        onClick={() => setLogsExpanded(e => !e)}
-                        className="text-[10px] text-zinc-600 hover:text-zinc-400 flex items-center gap-1 transition-colors"
-                    >
-                        <ChevronDown size={10} className={`transition-transform ${logsExpanded ? 'rotate-180' : ''}`} />
-                        {logsExpanded ? 'Hide logs' : 'Show logs'}
-                    </button>
-                    {logsExpanded && (
-                        <div className="mt-2 bg-black/40 rounded-lg p-2 max-h-28 overflow-y-auto custom-scrollbar font-mono text-[10px] text-zinc-400 space-y-0.5">
-                            {job.logs.map((l, i) => <div key={i}>{l}</div>)}
+            {/* ── Log terminal ── */}
+            {(isActive || job.logs?.length > 0 || job.error) && (
+                <div className={`bg-[#0c0c0e] border-b border-white/5 overflow-hidden flex flex-col transition-all duration-500
+                    ${isActive ? 'min-h-[160px] max-h-64' : 'max-h-32 opacity-60 hover:opacity-100'}`}>
+
+                    {/* Terminal header */}
+                    <div className="px-3 py-1.5 border-b border-white/5 bg-white/5 flex items-center justify-between shrink-0">
+                        <span className="text-[10px] font-mono text-zinc-400 flex items-center gap-1.5">
+                            <Terminal size={10} />
+                            {job.media?.name
+                                ? job.media.name.length > 40
+                                    ? job.media.name.slice(0, 40) + '…'
+                                    : job.media.name
+                                : 'Logs'}
+                        </span>
+                        <button
+                            onClick={() => setLogsOpen(o => !o)}
+                            className="text-zinc-600 hover:text-zinc-300 transition-colors"
+                            title={logsOpen ? 'Collapse logs' : 'Expand logs'}
+                        >
+                            <ChevronDown size={12} className={`transition-transform duration-200 ${logsOpen ? '' : 'rotate-180'}`} />
+                        </button>
+                    </div>
+
+                    {/* Log lines */}
+                    {logsOpen && (
+                        <div className="flex-1 p-3 overflow-y-auto font-mono text-[11px] space-y-1 custom-scrollbar">
+                            {job.logs?.map((log, i) => (
+                                <div
+                                    key={i}
+                                    className={`flex gap-2 leading-relaxed ${
+                                        log.toLowerCase().includes('error') || log.toLowerCase().includes('❌')
+                                            ? 'text-red-400'
+                                            : log.toLowerCase().includes('✅') || log.toLowerCase().includes('complete')
+                                                ? 'text-green-400'
+                                                : 'text-zinc-400'
+                                    }`}
+                                >
+                                    <span className="text-zinc-700 shrink-0 select-none">›</span>
+                                    <span className="break-all">{log}</span>
+                                </div>
+                            ))}
+
+                            {job.error && (
+                                <div className="flex gap-2 text-red-400">
+                                    <span className="text-red-700 shrink-0 select-none">›</span>
+                                    <span className="break-all">{job.error}</span>
+                                </div>
+                            )}
+
+                            {isActive && (
+                                <div className="animate-pulse text-primary/70 select-none">_</div>
+                            )}
+
+                            {/* Scroll anchor */}
+                            <div ref={logsEndRef} />
                         </div>
                     )}
                 </div>
             )}
 
-            {/* Clips grid */}
-            {expanded && job.status === 'complete' && clipCount > 0 && (
-                <div className="border-t border-white/5 p-4 animate-[fadeIn_0.25s_ease-out]">
+            {/* ── Clips grid (expandable) ── */}
+            {clipsExpanded && job.status === 'complete' && clipCount > 0 && (
+                <div className="p-4 animate-[fadeIn_0.25s_ease-out]">
                     <div className="flex items-center gap-2 mb-4">
                         <Sparkles size={14} className="text-yellow-400" />
                         <span className="text-xs font-bold text-white">Generated Clips</span>
