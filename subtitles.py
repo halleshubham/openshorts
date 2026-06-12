@@ -49,7 +49,10 @@ def _whisper_transcribe(model, audio_path, word_timestamps=True):
     the two-pass fix was introduced.
     """
     sample_30s = _extract_30s_audio(audio_path)
-    lang, lang_prob = model.detect_language(sample_30s)
+    # detect_language returns a list of (language, probability) pairs ranked by
+    # confidence; take the top result.
+    detected = model.detect_language(sample_30s)
+    lang, lang_prob = detected[0]
     seed = _SCRIPT_SEED.get(lang)
 
     print(f"   Detected language '{lang}' ({lang_prob:.2f})"
