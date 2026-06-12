@@ -439,11 +439,20 @@ def get_video_resolution(video_path):
     return width, height
 
 
-def sanitize_filename(filename):
-    """Remove invalid characters from filename."""
-    filename = re.sub(r'[<>:"/\\|?*#]', '', filename)
+def sanitize_filename(filename, max_bytes=160):
+    """Remove invalid characters and truncate to a safe byte length.
+
+    Uses bytes, not characters, so multi-byte scripts (Devanagari, CJK, Arabic)
+    don't exceed the 255-byte Linux filename limit.  160 bytes leaves room for
+    suffixes like '_clip_1.mp4', '_metadata.json', and yt-dlp's '.part'.
+    """
+    filename = re.sub(r'[<>:"/\\|?*#।॥]', '', filename)  # strip ASCII specials + Devanagari danda
     filename = filename.replace(' ', '_')
-    return filename[:100]
+    encoded = filename.encode('utf-8')
+    if len(encoded) > max_bytes:
+        # Truncate at a clean character boundary by decoding with 'ignore'
+        filename = encoded[:max_bytes].decode('utf-8', errors='ignore')
+    return filename
 
 
 def download_youtube_video(url, output_dir="."):
