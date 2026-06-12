@@ -24,36 +24,41 @@ _SCRIPT_SEED = {
 }
 
 
+def _extract_30s_audio(audio_path):
+    """Return the first 30 s of audio as a 16 kHz mono float32 numpy array.
+
+    Uses ffmpeg to read only 30 seconds so we never decode the full video
+    just for language detection.
+    """
+    import numpy as np
+    cmd = [
+        'ffmpeg', '-y', '-i', audio_path,
+        '-t', '30',
+        '-ar', '16000', '-ac', '1', '-f', 'f32le',
+        'pipe:1',
+    ]
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    return np.frombuffer(result.stdout, dtype=np.float32)
+
+
 def _whisper_transcribe(model, audio_path, word_timestamps=True):
     """
-    Detect language from the first 30 seconds only (fast), then transcribe
-    the full audio with that language + a native-script seed prompt so the
-    decoder stays in the correct Unicode block (e.g. Devanagari for hi/mr).
-
-    Previously this ran two full passes over the audio which doubled the time
-    for long videos. Now language detection takes < 1 second regardless of
-    video length.
+    Detect language from the first 30 seconds only (instant for any length),
+    then pass the FILE PATH to the full transcription so Whisper streams the
+    audio and starts yielding segments immediately — same behaviour as before
+    the two-pass fix was introduced.
     """
-    from faster_whisper import decode_audio
-    import numpy as np
-
-    # Decode audio once; detect_language needs a numpy array
-    print("   Loading audio for language detection...")
-    audio = decode_audio(audio_path)
-
-    # Use only the first 30 s (16 kHz mono) — same window Whisper uses internally
-    sample_30s = audio[:30 * 16000]
+    sample_30s = _extract_30s_audio(audio_path)
     lang, lang_prob = model.detect_language(sample_30s)
     seed = _SCRIPT_SEED.get(lang)
 
     print(f"   Detected language '{lang}' ({lang_prob:.2f})"
           f"{' — using script seed prompt' if seed else ''}")
-    print("   Starting transcription (this may take a few minutes for long videos)...")
 
-    # Full transcription with detected language + optional seed prompt.
-    # Pass the already-decoded numpy array so audio is not read from disk again.
+    # Pass the file path (not a numpy array) so faster-whisper streams audio
+    # via ffmpeg internally and the generator starts yielding segments at once.
     segments, info = model.transcribe(
-        audio,
+        audio_path,
         word_timestamps=word_timestamps,
         language=lang,
         initial_prompt=seed,
