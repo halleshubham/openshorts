@@ -26,30 +26,34 @@ _SCRIPT_SEED = {
 
 def _whisper_transcribe(model, audio_path, word_timestamps=True):
     """
-    Two-pass transcription that prevents Whisper from using the wrong
-    Unicode script for non-Latin languages:
-      1. Fast pass (beam_size=1, no word timestamps) to detect language.
-      2. Full pass with the detected language + a native-script seed prompt
-         so the decoder is anchored to the correct codepoint range.
+    Detect language from the first 30 seconds only (fast), then transcribe
+    the full audio with that language + a native-script seed prompt so the
+    decoder stays in the correct Unicode block (e.g. Devanagari for hi/mr).
+
+    Previously this ran two full passes over the audio which doubled the time
+    for long videos. Now language detection takes < 1 second regardless of
+    video length.
     """
-    # Pass 1 — language detection only (fast)
-    detect_segs, info = model.transcribe(
-        audio_path,
-        word_timestamps=False,
-        beam_size=1,
-        without_timestamps=True,
-    )
-    for _ in detect_segs:
-        pass  # consume generator to complete detection
+    from faster_whisper import decode_audio
+    import numpy as np
 
-    lang = info.language
+    # Decode audio once; detect_language needs a numpy array
+    print("   Loading audio for language detection...")
+    audio = decode_audio(audio_path)
+
+    # Use only the first 30 s (16 kHz mono) — same window Whisper uses internally
+    sample_30s = audio[:30 * 16000]
+    lang, lang_prob = model.detect_language(sample_30s)
     seed = _SCRIPT_SEED.get(lang)
-    print(f"   Detected language '{lang}' ({info.language_probability:.2f})"
-          f"{' — using script seed prompt' if seed else ''}")
 
-    # Pass 2 — full transcription with language + optional seed prompt
+    print(f"   Detected language '{lang}' ({lang_prob:.2f})"
+          f"{' — using script seed prompt' if seed else ''}")
+    print("   Starting transcription (this may take a few minutes for long videos)...")
+
+    # Full transcription with detected language + optional seed prompt.
+    # Pass the already-decoded numpy array so audio is not read from disk again.
     segments, info = model.transcribe(
-        audio_path,
+        audio,
         word_timestamps=word_timestamps,
         language=lang,
         initial_prompt=seed,
