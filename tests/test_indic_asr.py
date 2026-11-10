@@ -64,3 +64,28 @@ def test_font_for_language():
     assert subtitles.font_for_language("Anton", "hi") == "Noto Sans Devanagari"
     assert subtitles.font_for_language("Anton", "en") == "Anton"
     assert subtitles.font_for_language("Anton", None) == "Anton"
+
+
+def test_prompt_language_spells_out_devanagari_languages():
+    label = indic_asr.prompt_language("mr")
+    assert "Marathi" in label and "Devanagari" in label
+    assert "Hindi" in indic_asr.prompt_language("hi")
+    assert indic_asr.prompt_language("en") == "en"
+    assert indic_asr.prompt_language("unknown") == "unknown"
+
+
+def test_devanagari_hook_uses_a_devanagari_font(tmp_path, monkeypatch):
+    import pytest
+    import hooks
+    if hooks._devanagari_font_path() is None:
+        pytest.skip("Noto Sans Devanagari not installed")
+    monkeypatch.setattr(hooks, "download_font_if_needed", lambda: None)
+    loaded = []
+    real = hooks._load_text_font
+    monkeypatch.setattr(hooks, "_load_text_font",
+                        lambda path, size, text="": loaded.append(path) or real(path, size, text))
+    hooks.create_hook_image("क्षणात बदलणारे आयुष्य", 900, str(tmp_path / "h.png"))
+    assert "Devanagari" in loaded[0]
+    loaded.clear()
+    hooks.create_hook_image("Did you know?", 900, str(tmp_path / "e.png"))
+    assert "Devanagari" not in loaded[0]

@@ -38,6 +38,48 @@ HOOK_FONTS = {
     "serif": (FONT_PATH, 0.05),
 }
 
+# --- Indic scripts ----------------------------------------------------------
+# The bundled hook fonts (Montserrat, Anton, Noto Serif) have no Devanagari, so
+# a Hindi/Marathi hook came out as boxes. Pick a Noto Sans Devanagari face when
+# the text contains the script, and shape with Raqm (HarfBuzz) when Pillow has
+# it: basic layout draws conjuncts (क्ष, त्र, ज्ञ) and matras unjoined.
+_DEVANAGARI_RE = re.compile("[\u0900-\u097F\uA8E0-\uA8FF]")
+_DEVANAGARI_FONT_CANDIDATES = [
+    os.path.join(FONT_DIR, "NotoSansDevanagari-Bold.ttf"),
+    "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf",
+    "/usr/share/fonts/noto/NotoSansDevanagari-Bold.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
+]
+_DEVANAGARI_SIZE_FACTOR = 0.052
+
+
+def _devanagari_font_path():
+    """Path of a Devanagari-capable bold face, or None."""
+    for path in _DEVANAGARI_FONT_CANDIDATES:
+        if os.path.exists(path):
+            return path
+    try:
+        out = subprocess.run(
+            ["fc-match", "-f", "%{file}", "Noto Sans Devanagari:bold"],
+            capture_output=True, text=True, timeout=5).stdout.strip()
+        if out and os.path.exists(out) and "Devanagari" in os.path.basename(out):
+            return out
+    except Exception:
+        pass
+    return None
+
+
+def _load_text_font(path, size, text=""):
+    """truetype() with HarfBuzz shaping when available (needed for Indic)."""
+    try:
+        from PIL import features
+        if features.check("raqm"):
+            return ImageFont.truetype(path, size, layout_engine=ImageFont.Layout.RAQM)
+    except Exception:
+        pass
+    return ImageFont.truetype(path, size)
+
+
 # Codepoint ranges NotoSerif has no glyphs for (would render as tofu boxes).
 _EMOJI_RE = re.compile(
     "["
@@ -283,11 +325,18 @@ def create_hook_image(text, target_width, output_image_path="hook_overlay.png", 
     # (pill -> Montserrat, the rest -> Noto Serif, as they always rendered).
     default_font = "montserrat" if look.get("font") == PILL_FONT_PATH else "serif"
     font_path, size_factor = HOOK_FONTS.get(font or default_font, HOOK_FONTS[default_font])
+    if _DEVANAGARI_RE.search(text):
+        deva = _devanagari_font_path()
+        if deva:
+            font_path, size_factor = deva, _DEVANAGARI_SIZE_FACTOR
+        else:
+            print("⚠️ Devanagari hook but no Noto Sans Devanagari font found — "
+                  "install fonts-noto-core; text will render as boxes.")
     base_font_size = int(target_width * size_factor)
     font_size = int(base_font_size * font_scale)
     
     try:
-        font = ImageFont.truetype(font_path, font_size)
+        font = _load_text_font(font_path, font_size, text)
     except Exception as e:
         print(f"⚠️ Warning: Could not load font {font_path}, using default. Error: {e}")
         font = ImageFont.load_default()

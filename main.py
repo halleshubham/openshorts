@@ -28,6 +28,7 @@ import gpu_decode
 import gemini_worker
 import hook_grounding
 import layout_picker
+import indic_asr
 import llm_backend
 import twitch_signals
 from clip_selection import (build_transcript_windows, clip_count_targets,
@@ -2071,7 +2072,9 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
     stream's own viewers clipped. They are shown to both passes on the windows
     that hold them, and the hottest windows are guaranteed a shortlist slot.
     """
-    language = str(transcript_result.get('language') or 'unknown')
+    lang_code = str(transcript_result.get('language') or 'unknown')
+    # Devanagari languages get a spelled-out instruction (name, script, register).
+    language = indic_asr.prompt_language(lang_code)
     if llm_backend.active():
         # Self-hosted text model: no Google key needed for this stage.
         client = None
@@ -2086,7 +2089,7 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
             return None
         client = genai.Client(api_key=api_key)
         model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
-    print(f"\U0001f916  Model: {model_name} | language: {language}")
+    print(f"\U0001f916  Model: {model_name} | language: {lang_code}")
 
     # Full word list — ground truth for snapping cut points.
     words = []

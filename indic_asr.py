@@ -152,3 +152,23 @@ def whisper_params(model, media_path):
     if seed:
         params["initial_prompt"] = seed
     return params
+
+
+_LANGUAGE_NAMES = {"hi": "Hindi", "mr": "Marathi", "ne": "Nepali", "sa": "Sanskrit"}
+
+
+def prompt_language(code):
+    """How to name the transcript language to the LLM.
+
+    Gemini gets ``TRANSCRIPT_LANGUAGE: mr`` today and answers in whatever it
+    guesses (often Hindi, or Marathi in Latin letters). For Devanagari
+    languages spell out the name, the script and the register; every other
+    code is returned unchanged.
+    """
+    name = _LANGUAGE_NAMES.get(code)
+    if not name:
+        return code
+    return (f"{name} ({code}) — write in Devanagari script, in natural spoken "
+            f"{name} as in the transcript; never romanised/transliterated, and "
+            f"not in another Devanagari language. English words the speaker "
+            f"used may stay in English")
