@@ -38,6 +38,18 @@ videos/
 # Model files (downloaded at build time)
 *.pt
 
+# Runtime caches from the bind-mounted /app directory
+.cache/
+
+# Secrets — never bake real credentials into the image (repo is public,
+# image may be pushed to a registry). Runtime env comes via compose env_file.
+.env
+.env.*
+!.env.example
+!.env.cloud.example
+*.pem
+*.key
+
 # Docker
 Dockerfile
 docker-compose.yml
@@ -53,3 +65,6 @@ README.md
 
 
 
+
+# Rust build output
+osrender/target/

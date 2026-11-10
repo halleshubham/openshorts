@@ -1,9 +1,13 @@
 import React, { useState, useEffect } from 'react';
-import { X, Type, Loader2 } from 'lucide-react';
-import { getApiUrl } from '../config';
+import { Loader2 } from 'lucide-react';
+import { apiFetch } from '../lib/api';
 import RemotionPreview from './RemotionPreview';
+import Modal from './ui/Modal';
+import SegmentedControl from './ui/SegmentedControl';
 
 const FONT_OPTIONS = [
+    { value: 'Anton', label: 'Anton' },
+    { value: 'Montserrat ExtraBold', label: 'Montserrat' },
     { value: 'Verdana', label: 'Verdana' },
     { value: 'Arial', label: 'Arial' },
     { value: 'Impact', label: 'Impact' },
@@ -21,25 +25,146 @@ const COLOR_PRESETS = [
     { color: '#FF69B4', label: 'Pink' },
 ];
 
+const HIGHLIGHT_PRESETS = [
+    { color: '#FFE500', label: 'Yellow' },
+    { color: '#FFDD00', label: 'Gold' },
+    { color: '#A3FF12', label: 'Lime' },
+    { color: '#7C3AED', label: 'Purple' },
+    { color: '#FF4444', label: 'Red' },
+    { color: '#00FF88', label: 'Green' },
+    { color: '#00BBFF', label: 'Blue' },
+    { color: '#FF69B4', label: 'Pink' },
+];
+
 const ANIMATION_OPTIONS = [
     { value: 'pop', label: 'Pop' },
     { value: 'word-highlight', label: 'Glow' },
-    { value: 'karaoke', label: 'Karaoke' },
+    { value: 'karaoke', label: 'Box' },
     { value: 'none', label: 'None' },
 ];
 
-export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessing, videoUrl, jobId, clipIndex, existingHook }) {
+// Preview animation -> the effect burned server-side, so what the modal
+// plays is what the clip gets. 'karaoke' in the preview is a box behind the
+// active word, which is the 'highlight' effect.
+const ANIMATION_TO_EFFECT = { pop: 'pop', 'word-highlight': 'glow', karaoke: 'highlight', none: 'none' };
+const EFFECT_TO_ANIMATION = { pop: 'pop', glow: 'word-highlight', highlight: 'karaoke', box: 'karaoke', none: 'none' };
+
+// Font size in the units /api/subtitle takes. M is what every clip ships
+// with (subtitles.AUTO_CAPTION_STYLE font_size 44), so opening the modal and
+// applying never shrinks the captions.
+const SIZE_OPTIONS = [
+    { value: 34, label: 'S' },
+    { value: 44, label: 'M' },
+    { value: 56, label: 'L' },
+    { value: 70, label: 'XL' },
+];
+
+// Characters per line at size M, per font: Anton is condensed, Montserrat
+// wide. Bigger text gets proportionally fewer, so a line still fits the 9:16
+// frame instead of wrapping into a wall of text.
+const LINE_CHARS = { Anton: 16, 'Montserrat ExtraBold': 9, Impact: 16 };
+const lineBudget = (fontName, fontSize, oneWord) =>
+    oneWord ? 1 : Math.max(6, Math.round((LINE_CHARS[fontName] || 14) * 44 / fontSize));
+
+// libass sizes text against PlayResY 288 (subtitles.generate_ass): one unit
+// there is ~3.85 CSS px in the 1080x1920 preview, measured on burned frames.
+const PREVIEW_PX_PER_UNIT = 3.85;
+
+const POSITION_OPTIONS = [
+    { value: 'top', label: 'top' },
+    { value: 'middle', label: 'middle' },
+    { value: 'bottom', label: 'bottom' },
+];
+
+// Ready-made caption looks burned server-side as karaoke ASS (word highlight):
+// dimmed base text + strong active word, optional glow/pop/box effect.
+const CAPTION_PRESETS = [
+    // What every clip ships with (subtitles.AUTO_CAPTION_STYLE).
+    { id: 'default', label: 'Default',  style: 'karaoke', effect: 'pop',       highlightColor: '#FFE500', baseOpacity: 1.0, uppercase: true,  fontName: 'Anton', borderWidth: 4, fontSize: 44 },
+    // Trending short-form looks (2026): word-by-word build-up, a box behind
+    // the active word, one big word at a time, and the clean shadow-only look.
+    { id: 'hormozi', label: 'Hormozi',  style: 'karaoke', effect: 'pop',       highlightColor: '#FFE500', baseOpacity: 1.0, uppercase: true,  fontName: 'Montserrat ExtraBold', borderWidth: 4, shadow: 2, reveal: true, fontSize: 44 },
+    { id: 'pill',    label: 'Pill',     style: 'karaoke', effect: 'highlight', highlightColor: '#7C3AED', baseOpacity: 1.0, uppercase: true,  fontName: 'Montserrat ExtraBold', borderWidth: 3, fontSize: 44 },
+    { id: 'oneword', label: 'One word', style: 'karaoke', effect: 'pop',       highlightColor: '#FFFFFF', baseOpacity: 1.0, uppercase: true,  fontName: 'Anton', borderWidth: 5, oneWord: true, fontSize: 70 },
+    { id: 'clean',   label: 'Clean',    style: 'karaoke', effect: 'none',      highlightColor: '#FFFFFF', baseOpacity: 0.7, uppercase: false, fontName: 'Montserrat ExtraBold', borderWidth: 0, shadow: 2, fontSize: 34 },
+    { id: 'lime',    label: 'Lime box', style: 'karaoke', effect: 'highlight', highlightColor: '#A3FF12', baseOpacity: 1.0, uppercase: true,  fontName: 'Montserrat ExtraBold', borderWidth: 3, fontSize: 44 },
+    { id: 'tiktok',  label: 'TikTok',     style: 'karaoke', effect: 'none', highlightColor: '#FE2C55', baseOpacity: 0.75, uppercase: false, fontName: 'Verdana', borderWidth: 2 },
+    { id: 'reels',   label: 'Reels',      style: 'karaoke', effect: 'none', highlightColor: '#E1306C', baseOpacity: 0.7,  uppercase: false, fontName: 'Verdana', borderWidth: 2 },
+    { id: 'shorts',  label: 'Shorts Pop', style: 'karaoke', effect: 'pop',  highlightColor: '#FF0000', baseOpacity: 0.7,  uppercase: false, fontName: 'Verdana', borderWidth: 2 },
+    { id: 'gold',    label: 'Gold Glow',  style: 'karaoke', effect: 'glow', highlightColor: '#FFD700', baseOpacity: 0.6,  uppercase: false, fontName: 'Verdana', borderWidth: 2 },
+    { id: 'neon',    label: 'Neon',       style: 'karaoke', effect: 'glow', highlightColor: '#00FF88', baseOpacity: 0.55, uppercase: false, fontName: 'Verdana', borderWidth: 2 },
+    { id: 'cyber',   label: 'Cyber',      style: 'karaoke', effect: 'glow', highlightColor: '#00FFFF', baseOpacity: 0.5,  uppercase: false, fontName: 'Verdana', borderWidth: 2 },
+    { id: 'karaoke', label: 'Karaoke',    style: 'karaoke', effect: 'none', highlightColor: '#FF6B6B', baseOpacity: 0.6,  uppercase: false, fontName: 'Verdana', borderWidth: 2 },
+    { id: 'minimal', label: 'Minimal',    style: 'karaoke', effect: 'none', highlightColor: '#FFFFFF', baseOpacity: 0.65, uppercase: false, fontName: 'Verdana', borderWidth: 1 },
+    { id: 'beast',   label: 'Beast',      style: 'karaoke', effect: 'pop',  highlightColor: '#FFD700', baseOpacity: 1.0,  uppercase: true,  fontName: 'Impact',  borderWidth: 3 },
+    { id: 'boxed',   label: 'Boxed',      style: 'karaoke', effect: 'box',  highlightColor: '#7C3AED', baseOpacity: 0.85, uppercase: false, fontName: 'Verdana', borderWidth: 2 },
+    { id: 'classic', label: 'Classic',    style: 'classic', effect: 'none', highlightColor: '#FFD700', baseOpacity: 1.0,  uppercase: false, fontName: 'Verdana', borderWidth: 2 },
+];
+
+// Mirrors subtitles._luminance (Rec. 601).
+const luminance = (hex) => {
+    const m = /^#?([0-9a-fA-F]{6})$/.exec(hex || '');
+    if (!m) return 1;
+    const [r, g, b] = [0, 2, 4].map((i) => parseInt(m[1].slice(i, i + 2), 16));
+    return (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+};
+
+const swatchClass = (selected) =>
+    `w-6 h-6 rounded-full transition-all ${selected
+        ? 'ring-2 ring-[color:var(--color-accent)] ring-offset-2 ring-offset-[color:var(--color-paper-2)]'
+        : 'ring-1 ring-[color:var(--color-rule-2)] hover:ring-[color:var(--color-accent)]'}`;
+
+export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll, onRemove, isProcessing, videoUrl, jobId, clipIndex, existingHook, bulkCount = 0, bulkProgress }) {
+    // Opens on the look the clip already has (the Default preset), so
+    // "apply" without touching anything changes nothing.
     const [position, setPosition] = useState('bottom');
-    const [fontSize, setFontSize] = useState(24);
-    const [fontName, setFontName] = useState('Verdana');
+    const [fontSize, setFontSize] = useState(44);
+    const [fontName, setFontName] = useState('Anton');
     const [fontColor, setFontColor] = useState('#FFFFFF');
-    const [highlightColor, setHighlightColor] = useState('#FFDD00');
+    const [highlightColor, setHighlightColor] = useState('#FFE500');
     const [borderColor, setBorderColor] = useState('#000000');
-    const [borderWidth, setBorderWidth] = useState(2);
+    const [borderWidth, setBorderWidth] = useState(4);
     const [bgColor, setBgColor] = useState('#000000');
     const [bgOpacity, setBgOpacity] = useState(0.0);
-    const [animation, setAnimation] = useState('pop');
+    const [animation, setAnimationState] = useState('pop');
     const [showTextEditor, setShowTextEditor] = useState(false);
+
+    // Karaoke (server-side ASS burn) state
+    const [style, setStyle] = useState('karaoke'); // classic | karaoke
+    const [effect, setEffect] = useState('pop'); // none | glow | pop | box | highlight
+    const [baseOpacity, setBaseOpacity] = useState(1.0);
+    const [uppercase, setUppercase] = useState(true);
+    const [reveal, setReveal] = useState(false);
+    const [shadow, setShadow] = useState(0);
+    const [oneWord, setOneWord] = useState(false);
+    const [activePreset, setActivePreset] = useState('default');
+
+    const setAnimation = (value) => {
+        setAnimationState(value);
+        if (style === 'karaoke') setEffect(ANIMATION_TO_EFFECT[value] || 'none');
+    };
+
+    const applyPreset = (p) => {
+        setActivePreset(p.id);
+        setStyle(p.style);
+        setEffect(p.effect);
+        setHighlightColor(p.highlightColor);
+        setBaseOpacity(p.baseOpacity);
+        setUppercase(p.uppercase);
+        setFontName(p.fontName);
+        setBorderWidth(p.borderWidth);
+        setFontColor('#FFFFFF');
+        setBgOpacity(0);
+        setReveal(!!p.reveal);
+        setShadow(p.shadow || 0);
+        setOneWord(!!p.oneWord);
+        if (p.fontSize) setFontSize(p.fontSize);
+        setAnimationState(p.style === 'karaoke' ? (EFFECT_TO_ANIMATION[p.effect] || 'none') : 'none');
+    };
+
+    const maxChars = lineBudget(fontName, fontSize, oneWord);
+    // Same block duration as the auto captions (AUTO_CAPTION_STYLE).
+    const maxDuration = 1.4;
 
     // Remotion preview state
     const [captions, setCaptions] = useState([]);
@@ -54,7 +179,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
         if (!isOpen || !jobId || clipIndex === undefined) return;
 
         setCaptionsLoading(true);
-        fetch(getApiUrl(`/api/clip/${jobId}/${clipIndex}/transcript`))
+        apiFetch(`/api/clip/${jobId}/${clipIndex}/transcript`)
             .then((res) => res.ok ? res.json() : null)
             .then((data) => {
                 if (data && data.captions && data.captions.length > 0) {
@@ -99,9 +224,11 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
     const subtitleConfig = {
         captions,
         position,
+        maxChars,
+        maxDurationMs: maxDuration * 1000,
         style: {
             fontFamily: fontName,
-            fontSize: fontSize * 2.2, // Scale up for 1080p (modal fontSize is for small preview)
+            fontSize: Math.round(fontSize * 0.85 * PREVIEW_PX_PER_UNIT),
             fontColor,
             highlightColor,
             borderColor,
@@ -109,6 +236,13 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
             bgColor,
             bgOpacity,
             animation,
+            // Karaoke look reflected live in the playable preview.
+            baseOpacity: style === 'karaoke' ? baseOpacity : 1,
+            uppercase: style === 'karaoke' ? uppercase : false,
+            reveal: style === 'karaoke' && reveal,
+            shadow: style === 'karaoke' ? shadow : 0,
+            // Text on the active-word box: black on a light box, as burned.
+            highlightTextColor: luminance(highlightColor) > 0.6 ? '#000000' : fontColor,
         },
     };
 
@@ -142,21 +276,14 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
     };
 
     return (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out]">
-            <div className="bg-[#121214] border border-white/10 p-6 rounded-2xl w-full max-w-5xl shadow-2xl relative flex flex-col md:flex-row gap-6 max-h-[90vh]">
-                <button
-                    onClick={onClose}
-                    className="absolute top-4 right-4 text-zinc-500 hover:text-white z-10"
-                >
-                    <X size={20} />
-                </button>
-
+        <Modal isOpen={isOpen} onClose={onClose} size="xl" eyebrow="EDITOR · SUBTITLES" title="subtitles">
+            <div className="flex flex-col md:flex-row gap-6">
                 {/* Left: Preview */}
-                <div className="flex-1 flex flex-col items-center justify-center bg-black rounded-lg border border-white/5 overflow-hidden relative aspect-[9/16] max-h-[600px]">
+                <div className="flex-1 flex flex-col items-center justify-center bg-black rounded-card border border-rule overflow-hidden relative aspect-[9/16] max-h-[600px]">
                     {captionsLoading ? (
-                        <div className="flex items-center gap-2 text-zinc-400">
+                        <div className="flex items-center gap-2 text-muted">
                             <Loader2 size={16} className="animate-spin" />
-                            <span className="text-sm">Loading preview...</span>
+                            <span className="text-sm lowercase">Loading preview...</span>
                         </div>
                     ) : useRemotionPreview ? (
                         <RemotionPreview
@@ -183,41 +310,106 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
 
                 {/* Right: Controls */}
                 <div className="w-full md:w-80 flex flex-col">
-                    <h3 className="text-xl font-bold text-white mb-4 flex items-center gap-2 shrink-0">
-                        <Type className="text-primary" /> Auto Subtitles
-                    </h3>
-
                     <div className="space-y-5 flex-1 overflow-y-auto custom-scrollbar pr-1">
-                        {/* Position Selector */}
+                        {/* Caption presets (server-side karaoke burn) */}
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 block">Position</label>
-                            <div className="grid grid-cols-3 gap-2">
-                                {['top', 'middle', 'bottom'].map((pos) => (
+                            <p className="eyebrow mb-2">Preset</p>
+                            <div className="grid grid-cols-3 gap-1.5">
+                                {CAPTION_PRESETS.map((p) => (
                                     <button
-                                        key={pos}
-                                        onClick={() => setPosition(pos)}
-                                        className={`p-2 rounded-lg border text-center text-xs font-medium transition-all ${position === pos ? 'bg-primary/20 border-primary text-white' : 'bg-white/5 border-white/5 text-zinc-400 hover:bg-white/10'}`}
+                                        key={p.id}
+                                        onClick={() => applyPreset(p)}
+                                        className={`px-2 py-1.5 rounded-input border text-xs transition-colors flex items-center gap-1.5 justify-center
+                                            ${activePreset === p.id
+                                                ? 'border-[color:var(--color-accent)] text-ink'
+                                                : 'border-rule2 text-muted hover:border-[color:var(--color-accent)]'}`}
+                                        title={p.label}
                                     >
-                                        {pos.charAt(0).toUpperCase() + pos.slice(1)}
+                                        <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: p.highlightColor }} />
+                                        {p.label}
                                     </button>
                                 ))}
                             </div>
+                            {style === 'karaoke' && (
+                                <div className="mt-3 space-y-3 animate-fade">
+                                    <div className="flex items-center justify-between">
+                                        <span className="readout">UPPERCASE</span>
+                                        <label className="relative inline-flex items-center cursor-pointer">
+                                            <input type="checkbox" checked={uppercase} onChange={(e) => setUppercase(e.target.checked)} className="sr-only peer" />
+                                            <div className="w-8 h-4 rounded-full bg-paper3 peer-checked:bg-brass transition-colors after:content-[''] after:absolute after:top-0 after:left-0 after:h-4 after:w-4 after:rounded-full after:bg-ink after:transition-all peer-checked:after:translate-x-full"></div>
+                                        </label>
+                                    </div>
+                                    <div>
+                                        <div className="flex justify-between mb-1">
+                                            <span className="readout">Dim inactive words</span>
+                                            <span className="readout">{Math.round(baseOpacity * 100)}%</span>
+                                        </div>
+                                        <input
+                                            type="range"
+                                            min="30"
+                                            max="100"
+                                            value={Math.round(baseOpacity * 100)}
+                                            onChange={(e) => setBaseOpacity(parseInt(e.target.value) / 100)}
+                                            className="w-full accent-[var(--color-accent)]"
+                                        />
+                                    </div>
+                                </div>
+                            )}
                         </div>
+
+                        {/* Position Selector */}
+                        <div>
+                            <p className="eyebrow mb-2">Position</p>
+                            <SegmentedControl
+                                options={POSITION_OPTIONS}
+                                value={position}
+                                onChange={setPosition}
+                                size="sm"
+                            />
+                        </div>
+
+                        {/* Size */}
+                        <div>
+                            <p className="eyebrow mb-2">Size</p>
+                            <SegmentedControl
+                                options={SIZE_OPTIONS}
+                                value={fontSize}
+                                onChange={setFontSize}
+                                size="sm"
+                            />
+                        </div>
+
+                        {style === 'karaoke' && (
+                            <div className="space-y-3">
+                                <div className="flex items-center justify-between">
+                                    <span className="readout">One word at a time</span>
+                                    <label className="relative inline-flex items-center cursor-pointer">
+                                        <input type="checkbox" checked={oneWord} onChange={(e) => setOneWord(e.target.checked)} className="sr-only peer" />
+                                        <div className="w-8 h-4 rounded-full bg-paper3 peer-checked:bg-brass transition-colors after:content-[''] after:absolute after:top-0 after:left-0 after:h-4 after:w-4 after:rounded-full after:bg-ink after:transition-all peer-checked:after:translate-x-full"></div>
+                                    </label>
+                                </div>
+                                {!oneWord && (
+                                    <div className="flex items-center justify-between">
+                                        <span className="readout">Reveal word by word</span>
+                                        <label className="relative inline-flex items-center cursor-pointer">
+                                            <input type="checkbox" checked={reveal} onChange={(e) => setReveal(e.target.checked)} className="sr-only peer" />
+                                            <div className="w-8 h-4 rounded-full bg-paper3 peer-checked:bg-brass transition-colors after:content-[''] after:absolute after:top-0 after:left-0 after:h-4 after:w-4 after:rounded-full after:bg-ink after:transition-all peer-checked:after:translate-x-full"></div>
+                                        </label>
+                                    </div>
+                                )}
+                            </div>
+                        )}
 
                         {/* Animation Style (new) */}
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 block">Animation</label>
-                            <div className="grid grid-cols-2 gap-2">
-                                {ANIMATION_OPTIONS.map((opt) => (
-                                    <button
-                                        key={opt.value}
-                                        onClick={() => setAnimation(opt.value)}
-                                        className={`p-2 rounded-lg border text-center text-xs font-medium transition-all ${animation === opt.value ? 'bg-primary/20 border-primary text-white' : 'bg-white/5 border-white/5 text-zinc-400 hover:bg-white/10'}`}
-                                    >
-                                        {opt.label}
-                                    </button>
-                                ))}
-                            </div>
+                            <p className="eyebrow mb-2">Animation</p>
+                            <SegmentedControl
+                                options={ANIMATION_OPTIONS}
+                                value={animation}
+                                onChange={setAnimation}
+                                columns={2}
+                                size="sm"
+                            />
                         </div>
 
                         {/* Editable Transcript (collapsible) */}
@@ -226,17 +418,18 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                 <button
                                     type="button"
                                     onClick={() => setShowTextEditor(!showTextEditor)}
-                                    className="w-full flex items-center justify-between text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2"
+                                    className="w-full flex items-center justify-between mb-2"
                                 >
-                                    <span>Edit Text ({captions.length} words)</span>
-                                    <span className={`transition-transform ${showTextEditor ? 'rotate-180' : ''}`}>▾</span>
+                                    <span className="eyebrow">Edit text ({captions.length} words)</span>
+                                    <span className={`text-muted transition-transform ${showTextEditor ? 'rotate-180' : ''}`}>▾</span>
                                 </button>
                                 {showTextEditor && (
                                     <textarea
                                         value={editableText}
                                         onChange={(e) => handleTextEdit(e.target.value)}
                                         rows={5}
-                                        className="w-full bg-black/40 border border-white/10 rounded-lg p-2.5 text-sm text-white focus:outline-none focus:border-primary/50 resize-none leading-relaxed animate-[fadeIn_0.15s_ease-out]"
+                                        dir="auto"
+                                        className="input-field resize-none leading-relaxed animate-fade"
                                         placeholder="Edit subtitle text..."
                                     />
                                 )}
@@ -245,11 +438,11 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
 
                         {/* Font Family */}
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 block">Font</label>
+                            <p className="eyebrow mb-2">Font</p>
                             <select
                                 value={fontName}
                                 onChange={(e) => setFontName(e.target.value)}
-                                className="w-full bg-black/40 border border-white/10 rounded-lg p-2 text-sm text-white focus:outline-none focus:border-primary/50"
+                                className="input-field"
                             >
                                 {FONT_OPTIONS.map((f) => (
                                     <option key={f.value} value={f.value} style={{ fontFamily: f.value }}>{f.label}</option>
@@ -259,19 +452,19 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
 
                         {/* Text Color */}
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 block">Text Color</label>
-                            <div className="flex flex-wrap gap-2">
+                            <p className="eyebrow mb-2">Text color</p>
+                            <div className="flex flex-wrap items-center gap-2.5">
                                 {COLOR_PRESETS.map((c) => (
                                     <button
                                         key={c.color}
                                         onClick={() => setFontColor(c.color)}
-                                        className={`w-7 h-7 rounded-full border-2 transition-all ${fontColor === c.color ? 'border-white scale-110' : 'border-white/20 hover:border-white/50'}`}
+                                        className={swatchClass(fontColor === c.color)}
                                         style={{ backgroundColor: c.color }}
                                         title={c.label}
                                     />
                                 ))}
-                                <label className="w-7 h-7 rounded-full border-2 border-dashed border-white/20 cursor-pointer flex items-center justify-center hover:border-white/50 transition-all overflow-hidden relative" title="Custom color">
-                                    <span className="text-[10px] text-zinc-400">+</span>
+                                <label className="w-6 h-6 rounded-full border border-dashed border-rule2 cursor-pointer flex items-center justify-center hover:border-brass transition-colors overflow-hidden relative" title="Custom color">
+                                    <span className="text-xs text-muted leading-none">+</span>
                                     <input type="color" value={fontColor} onChange={(e) => setFontColor(e.target.value)} className="absolute inset-0 opacity-0 cursor-pointer" />
                                 </label>
                             </div>
@@ -279,13 +472,13 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
 
                         {/* Highlight Color (new) */}
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 block">Highlight Color</label>
-                            <div className="flex flex-wrap gap-2">
-                                {[{ color: '#FFDD00', label: 'Gold' }, { color: '#FF4444', label: 'Red' }, { color: '#00FF88', label: 'Green' }, { color: '#00BBFF', label: 'Blue' }, { color: '#FF69B4', label: 'Pink' }].map((c) => (
+                            <p className="eyebrow mb-2">Highlight</p>
+                            <div className="flex flex-wrap items-center gap-2.5">
+                                {HIGHLIGHT_PRESETS.map((c) => (
                                     <button
                                         key={c.color}
                                         onClick={() => setHighlightColor(c.color)}
-                                        className={`w-7 h-7 rounded-full border-2 transition-all ${highlightColor === c.color ? 'border-white scale-110' : 'border-white/20 hover:border-white/50'}`}
+                                        className={swatchClass(highlightColor === c.color)}
                                         style={{ backgroundColor: c.color }}
                                         title={c.label}
                                     />
@@ -295,9 +488,9 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
 
                         {/* Border / Outline */}
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 block">Border</label>
+                            <p className="eyebrow mb-2">Border</p>
                             <div className="flex items-center gap-3">
-                                <label className="relative w-8 h-8 rounded-lg border border-white/10 cursor-pointer overflow-hidden shrink-0" title="Border color">
+                                <label className="relative w-8 h-8 rounded-input border border-rule2 cursor-pointer overflow-hidden shrink-0" title="Border color">
                                     <div className="w-full h-full" style={{ backgroundColor: borderColor }} />
                                     <input type="color" value={borderColor} onChange={(e) => setBorderColor(e.target.value)} className="absolute inset-0 opacity-0 cursor-pointer" />
                                 </label>
@@ -308,11 +501,11 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                         max="5"
                                         value={borderWidth}
                                         onChange={(e) => setBorderWidth(parseInt(e.target.value))}
-                                        className="w-full accent-primary"
+                                        className="w-full accent-[var(--color-accent)]"
                                     />
-                                    <div className="flex justify-between text-[10px] text-zinc-500">
-                                        <span>None</span>
-                                        <span>Thick</span>
+                                    <div className="flex justify-between">
+                                        <span className="readout">None</span>
+                                        <span className="readout">Thick</span>
                                     </div>
                                 </div>
                             </div>
@@ -321,16 +514,16 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                         {/* Background Box */}
                         <div>
                             <div className="flex items-center justify-between mb-2">
-                                <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider">Background Box</label>
+                                <p className="eyebrow">Background</p>
                                 <label className="relative inline-flex items-center cursor-pointer">
                                     <input type="checkbox" checked={bgOpacity > 0} onChange={(e) => setBgOpacity(e.target.checked ? 0.5 : 0)} className="sr-only peer" />
-                                    <div className="w-8 h-4 bg-zinc-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[0px] after:left-[0px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-primary"></div>
+                                    <div className="w-8 h-4 rounded-full bg-paper3 peer-checked:bg-brass transition-colors after:content-[''] after:absolute after:top-0 after:left-0 after:h-4 after:w-4 after:rounded-full after:bg-ink after:transition-all peer-checked:after:translate-x-full"></div>
                                 </label>
                             </div>
                             {bgOpacity > 0 && (
-                                <div className="space-y-3 animate-[fadeIn_0.2s_ease-out]">
+                                <div className="space-y-3 animate-fade">
                                     <div className="flex items-center gap-3">
-                                        <label className="relative w-8 h-8 rounded-lg border border-white/10 cursor-pointer overflow-hidden shrink-0" title="Background color">
+                                        <label className="relative w-8 h-8 rounded-input border border-rule2 cursor-pointer overflow-hidden shrink-0" title="Background color">
                                             <div className="w-full h-full" style={{ backgroundColor: bgColor }} />
                                             <input type="color" value={bgColor} onChange={(e) => setBgColor(e.target.value)} className="absolute inset-0 opacity-0 cursor-pointer" />
                                         </label>
@@ -341,11 +534,11 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                                 max="100"
                                                 value={Math.round(bgOpacity * 100)}
                                                 onChange={(e) => setBgOpacity(parseInt(e.target.value) / 100)}
-                                                className="w-full accent-primary"
+                                                className="w-full accent-[var(--color-accent)]"
                                             />
-                                            <div className="flex justify-between text-[10px] text-zinc-500">
-                                                <span>Transparent</span>
-                                                <span>{Math.round(bgOpacity * 100)}%</span>
+                                            <div className="flex justify-between">
+                                                <span className="readout">Transparent</span>
+                                                <span className="readout">{Math.round(bgOpacity * 100)}%</span>
                                             </div>
                                         </div>
                                     </div>
@@ -354,20 +547,67 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                         </div>
                     </div>
 
-                    <button
-                        onClick={() => onGenerate({
-                            position, fontSize, fontName, fontColor, borderColor, borderWidth, bgColor, bgOpacity,
-                            // Remotion data
-                            remotion: useRemotionPreview ? subtitleConfig : null,
-                        })}
-                        disabled={isProcessing}
-                        className="w-full py-3 mt-4 bg-gradient-to-r from-yellow-500 to-orange-500 hover:from-yellow-400 hover:to-orange-400 text-black font-bold rounded-xl shadow-lg shadow-orange-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 shrink-0"
-                    >
-                        {isProcessing ? <Loader2 size={20} className="animate-spin" /> : <Type size={20} />}
-                        {isProcessing ? 'Generating...' : 'Generate Subtitles'}
-                    </button>
+                    <div className="mt-5 shrink-0 space-y-2">
+                        {(() => {
+                            // Text edits must survive the server render path too
+                            // (issue #69): send the edited words whenever the text
+                            // differs from what the transcript produced.
+                            const textEdited = originalCaptions.length > 0
+                                && editableText.trim() !== originalCaptions.map((c) => c.text).join(' ').trim();
+                            const styleOptions = {
+                                position, fontSize, fontName, fontColor, borderColor, borderWidth, bgColor, bgOpacity,
+                                // Karaoke burn (server-side ASS render)
+                                style, effect, baseOpacity, uppercase, highlightColor,
+                                reveal: !oneWord && reveal, shadow, maxChars, maxDuration,
+                                // Remotion data
+                                remotion: useRemotionPreview ? subtitleConfig : null,
+                                captions: textEdited ? captions : null,
+                            };
+                            const bulkRunning = bulkProgress?.running;
+                            return (
+                                <>
+                                    <div className="flex gap-2">
+                                        <button onClick={onClose} className="btn-ghost">
+                                            cancel
+                                        </button>
+                                        <button
+                                            onClick={() => onGenerate(styleOptions)}
+                                            disabled={isProcessing}
+                                            className="btn-primary flex-1"
+                                        >
+                                            {(isProcessing && !bulkRunning) && <Loader2 size={16} className="animate-spin text-brassink" />}
+                                            {(isProcessing && !bulkRunning) ? 'generating...' : 'apply to this clip'}
+                                        </button>
+                                    </div>
+                                    {onApplyAll && bulkCount > 1 && (
+                                        <button
+                                            onClick={() => onApplyAll({ ...styleOptions, captions: null })}
+                                            disabled={isProcessing}
+                                            className="btn-ghost w-full flex items-center justify-center gap-2"
+                                        >
+                                            {bulkRunning
+                                                ? <><Loader2 size={16} className="animate-spin" />applying to all… {bulkProgress.current}/{bulkProgress.total}</>
+                                                : `apply this style to all ${bulkCount} clips`}
+                                        </button>
+                                    )}
+                                    {/* Clips ship captioned by default, so the way
+                                        out has to be here — otherwise a user who
+                                        doesn't want captions is stuck with them. */}
+                                    {onRemove && (
+                                        <button
+                                            onClick={onRemove}
+                                            disabled={isProcessing}
+                                            className="text-xs text-muted underline underline-offset-2 lowercase hover:text-ink2 disabled:opacity-50"
+                                        >
+                                            remove captions from this clip
+                                        </button>
+                                    )}
+                                </>
+                            );
+                        })()}
+                    </div>
                 </div>
             </div>
-        </div>
+        </Modal>
     );
 }

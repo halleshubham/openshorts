@@ -8,7 +8,12 @@ import {
   interpolate,
 } from "remotion";
 import type { HookConfig } from "../lib/types";
-import { notoSerifFontFace, NOTO_SERIF_FONT_FAMILY } from "../lib/fonts";
+import {
+  notoSerifFontFace,
+  montserratFontFace,
+  antonFontFace,
+  HOOK_FONTS,
+} from "../lib/fonts";
 
 interface HookOverlayProps {
   config: HookConfig;
@@ -20,10 +25,32 @@ const SIZE_SCALE: Record<string, number> = {
   L: 1.3,
 };
 
+// Percentages must match hooks.py's overlay_y math (top 20% / bottom 70%),
+// or the preview drifts from what the server path renders.
 const POSITION_STYLE: Record<string, React.CSSProperties> = {
-  top: { top: "18%", bottom: "auto" },
+  top: { top: "20%", bottom: "auto" },
   center: { top: "50%", bottom: "auto", transform: "translateY(-50%)" },
-  bottom: { top: "68%", bottom: "auto" },
+  bottom: { top: "70%", bottom: "auto" },
+};
+
+// Must mirror hooks.py HOOK_STYLES (the server-side FFmpeg fallback).
+interface HookLook {
+  box: string | null;
+  text: string;
+  outlinePx: number;
+  shadow: boolean;
+  /** One rounded box per line (hooks.py _draw_pills) instead of one card. */
+  pills?: boolean;
+}
+
+const HOOK_LOOKS: Record<string, HookLook> = {
+  pill: { box: "rgba(255, 255, 255, 0.98)", text: "#000000", outlinePx: 0, shadow: false, pills: true },
+  classic: { box: "rgba(255, 255, 255, 0.94)", text: "#000000", outlinePx: 0, shadow: true },
+  dark: { box: "rgba(18, 18, 20, 0.92)", text: "#FFFFFF", outlinePx: 0, shadow: true },
+  yellow: { box: "rgba(255, 214, 0, 0.96)", text: "#000000", outlinePx: 0, shadow: true },
+  red: { box: "rgba(220, 38, 38, 0.96)", text: "#FFFFFF", outlinePx: 0, shadow: true },
+  outline: { box: null, text: "#FFFFFF", outlinePx: 8, shadow: false },
+  outline_yellow: { box: null, text: "#FFD600", outlinePx: 8, shadow: false },
 };
 
 export const HookOverlay: React.FC<HookOverlayProps> = ({ config }) => {
@@ -32,7 +59,7 @@ export const HookOverlay: React.FC<HookOverlayProps> = ({ config }) => {
 
   return (
     <AbsoluteFill>
-      <style>{notoSerifFontFace}</style>
+      <style>{notoSerifFontFace + montserratFontFace + antonFontFace}</style>
       <Sequence from={0} durationInFrames={displayFrames} layout="none">
         <HookBox config={config} displayFrames={displayFrames} />
       </Sequence>
@@ -98,10 +125,57 @@ const HookBox: React.FC<HookBoxProps> = ({ config, displayFrames }) => {
   }
 
   const positionStyle = POSITION_STYLE[config.position] ?? POSITION_STYLE.top;
+  const look = HOOK_LOOKS[config.style ?? "pill"] ?? HOOK_LOOKS.pill;
 
-  // Base font size: 5% of 1080 width (matches hooks.py logic)
-  const baseFontSize = 1080 * 0.05;
-  const fontSize = Math.round(baseFontSize * scale);
+  // Typeface and size as hooks.py: the chosen font, else the style's own;
+  // font size = factor x the 90%-of-width box.
+  const typeface = HOOK_FONTS[config.font ?? (look.pills ? "montserrat" : "serif")] ?? HOOK_FONTS.serif;
+  const fontSize = Math.round(1080 * 0.9 * typeface.factor * scale);
+  const outlinePx = Math.round(look.outlinePx * scale);
+
+  if (look.pills) {
+    // box-decoration-break: clone gives every wrapped line its own padded,
+    // rounded box, the same stack hooks.py draws for the FFmpeg path.
+    return (
+      <div
+        style={{
+          position: "absolute",
+          left: 0,
+          right: 0,
+          display: "flex",
+          justifyContent: "center",
+          ...positionStyle,
+        }}
+      >
+        <div
+          style={{
+            opacity: animOpacity,
+            transform: `scale(${animScale}) translateY(${animTranslateY}px)`,
+            maxWidth: "90%",
+            textAlign: "center",
+            lineHeight: 1.62,
+          }}
+        >
+          <span
+            style={{
+              fontFamily: typeface.family,
+              fontSize,
+              fontWeight: typeface.weight,
+              color: look.text,
+              backgroundColor: look.box ?? "transparent",
+              padding: `${Math.round(fontSize * 0.2)}px ${Math.round(fontSize * 0.48)}px`,
+              borderRadius: Math.round(fontSize * 0.36),
+              WebkitBoxDecorationBreak: "clone",
+              boxDecorationBreak: "clone",
+              wordBreak: "break-word",
+            }}
+          >
+            {config.text}
+          </span>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -119,21 +193,27 @@ const HookBox: React.FC<HookBoxProps> = ({ config, displayFrames }) => {
           opacity: animOpacity,
           transform: `scale(${animScale}) translateY(${animTranslateY}px)`,
           maxWidth: "90%",
-          backgroundColor: "rgba(255, 255, 255, 0.94)",
+          backgroundColor: look.box ?? "transparent",
           borderRadius: 20,
-          padding: `${25 * scale}px ${30 * scale}px`,
-          boxShadow: "5px 5px 15px rgba(0, 0, 0, 0.25)",
+          padding: look.box ? `${25 * scale}px ${30 * scale}px` : 0,
+          boxShadow: look.shadow ? "5px 5px 15px rgba(0, 0, 0, 0.25)" : "none",
           textAlign: "center",
         }}
       >
         <span
           style={{
-            fontFamily: `'${NOTO_SERIF_FONT_FAMILY}', 'Noto Serif', Georgia, serif`,
+            fontFamily: typeface.family,
             fontSize,
-            fontWeight: 700,
-            color: "#000000",
+            fontWeight: typeface.weight,
+            color: look.text,
             lineHeight: 1.4,
             wordBreak: "break-word",
+            ...(outlinePx > 0
+              ? {
+                  WebkitTextStroke: `${outlinePx}px #000000`,
+                  paintOrder: "stroke fill",
+                }
+              : {}),
           }}
         >
           {config.text}

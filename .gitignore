@@ -37,6 +37,18 @@ output/
 .agents/
 .agent/
 .claude/
-skills/
+# skills/ holds third-party installs (symlinks); our own published skill is versioned
+skills/*
+!skills/openshorts/
 skills-lock.json
 
+
+# Cloud env example kept local only (avoid leaking infra hints)
+.env.cloud.example
+.worktrees
+
+# Instrucciones locales con datos de infra (repo público)
+CLAUDE.local.md
+
+# Rust build output
+osrender/target/

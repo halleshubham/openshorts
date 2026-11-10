@@ -17,6 +17,8 @@ import re
 import json
 import time
 import subprocess
+
+from ffmpeg_utils import video_encode_args, DELIVERY, mark_ai_generated
 import httpx
 from urllib.parse import urljoin
 from typing import Optional, List, Dict, Callable
@@ -37,7 +39,7 @@ DEFAULT_VOICES = {
 }
 
 
-GEMINI_MODEL = "gemini-3-flash-preview"
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL_SAAS") or os.environ.get("GEMINI_MODEL") or "gemini-3.1-flash-lite"
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -148,17 +150,36 @@ Be thorough. Use REAL data from your search results, not made-up information."""
 
 
 def scrape_website(url: str) -> dict:
-    """Scrape a SaaS website to extract key content for analysis."""
-    from bs4 import BeautifulSoup
+    """Scrape a SaaS website to extract key content for analysis.
 
+    Only public addresses resolve while it runs (ssrf_guard): the per-hop
+    checks below look the host up once, the connection looks it up again."""
+    import ssrf_guard
+    with ssrf_guard.guarded():
+        return _scrape_website(url)
+
+
+def _scrape_website(url: str) -> dict:
+    from bs4 import BeautifulSoup
+    from security_utils import assert_public_url
+
+    # SSRF guard: reject non-http(s) / private / metadata hosts, and re-validate
+    # every redirect hop so a public URL can't 30x-bounce us to an internal host.
+    current = assert_public_url(url)
     print(f"[SaaSShorts] 🌐 Scraping {url}...")
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
-    with httpx.Client(timeout=30.0, follow_redirects=True) as client:
-        response = client.get(url, headers=headers)
+    with httpx.Client(timeout=30.0, follow_redirects=False) as client:
+        response = None
+        for _ in range(5):
+            response = client.get(current, headers=headers)
+            if response.has_redirect_location:
+                current = assert_public_url(str(response.next_request.url))
+                continue
+            break
         response.raise_for_status()
 
     soup = BeautifulSoup(response.text, "html.parser")
@@ -211,9 +232,19 @@ def scrape_website(url: str) -> dict:
     for sub_url in list(subpages)[:3]:
         try:
             print(f"[SaaSShorts]   → Subpage: {sub_url}")
-            with httpx.Client(timeout=20.0, follow_redirects=True) as client:
-                resp = client.get(sub_url, headers=headers)
-                if resp.status_code == 200:
+            # Same SSRF guard as the main page: no auto-redirects and re-validate
+            # every hop, so a same-host page can't 30x-bounce us onto an internal
+            # host (e.g. 169.254.169.254 cloud metadata).
+            sub_current = assert_public_url(sub_url)
+            with httpx.Client(timeout=20.0, follow_redirects=False) as client:
+                resp = None
+                for _ in range(5):
+                    resp = client.get(sub_current, headers=headers)
+                    if resp.has_redirect_location:
+                        sub_current = assert_public_url(str(resp.next_request.url))
+                        continue
+                    break
+                if resp is not None and resp.status_code == 200:
                     sub_soup = BeautifulSoup(resp.text, "html.parser")
                     for tag in sub_soup(["script", "style", "nav", "footer", "header", "noscript"]):
                         tag.decompose()
@@ -998,7 +1029,7 @@ def generate_broll(
         "-vf", zoompan_filter,
         "-t", str(dur_secs),
         "-map", "0:v", "-map", "1:a",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+        *video_encode_args(DELIVERY),
         "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "128k",
         "-shortest",
@@ -1048,24 +1079,26 @@ def _format_ass_time(seconds: float) -> str:
 
 def transcribe_audio_for_subs(audio_path: str) -> list:
     """
-    Transcribe audio with word-level timestamps using faster-whisper.
+    Transcribe audio with word-level timestamps via the configured ASR backend.
     Returns list of {"word": str, "start": float, "end": float}.
     """
-    from faster_whisper import WhisperModel
+    from transcribe_backends import transcribe_media, release_models
 
     print(f"[SaaSShorts] 🎙️ Transcribing audio for subtitles...")
-    model = WhisperModel("base", device="cpu", compute_type="int8")
-    segments, info = model.transcribe(audio_path, word_timestamps=True)
+    try:
+        transcript = transcribe_media(audio_path)
+    finally:
+        # This runs inside the API process, like the thumbnail studio and
+        # the dubbed-subtitle path: the models must not stay resident
+        # (transcribe_backends.release_models). Measured 17-sep-2026, 30 min
+        # after a deploy: one SaaSShorts job left uvicorn holding 5.1 GB.
+        release_models()
 
-    words = []
-    for segment in segments:
-        if segment.words:
-            for w in segment.words:
-                words.append({
-                    "word": w.word.strip(),
-                    "start": w.start,
-                    "end": w.end,
-                })
+    words = [
+        {"word": w["word"].strip(), "start": w["start"], "end": w["end"]}
+        for segment in transcript["segments"]
+        for w in segment.get("words", [])
+    ]
 
     print(f"[SaaSShorts] ✅ Transcribed {len(words)} words")
     return words
@@ -1183,7 +1216,7 @@ def composite_video(
             "ffmpeg", "-y",
             "-i", talking_head_path,
             "-vf", sub_filter,
-            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+            *video_encode_args(DELIVERY),
             "-c:a", "aac", "-b:a", "128k",
             output_path,
         ]
@@ -1273,7 +1306,7 @@ def composite_video(
         "-filter_complex", filter_str,
         "-map", "[finalv]",
         "-map", "[outa]",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+        *video_encode_args(DELIVERY),
         "-c:a", "aac", "-b:a", "128k",
         output_path,
     ]
@@ -1440,6 +1473,10 @@ def generate_full_video(
     log("[6/6] Compositing final video with FFmpeg...")
     hook_text = script.get("hook_text", "")
     composite_video(talking_head, broll_clips, srt_path, hook_text, final_path)
+
+    # AI Act art. 50(2): actor, voice and b-roll are all synthetic here, so the
+    # file carries a machine-readable marking. Best effort, never fatal.
+    mark_ai_generated(final_path, "AI actor, AI voiceover and generated b-roll")
 
     log("🎉 Video generation complete!")
 
