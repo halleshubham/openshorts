@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Link2, Upload, FileVideo, X, Info, Loader2, ChevronDown } from 'lucide-react';
+import { Link2, Upload, FileVideo, X, Info, Loader2, ChevronDown, Layers } from 'lucide-react';
 import { track } from '../lib/analytics';
 import { getApiUrl } from '../config';
 import SourceCost from './SourceCost';
@@ -30,10 +30,18 @@ const readVideoDuration = (file) => new Promise((resolve) => {
     } catch { resolve(null); }
 });
 
-export default function MediaInput({ onProcess, isProcessing }) {
+// Videos per batch: each one is a full pipeline run, queued one after another.
+const MAX_BATCH = 20;
+
+export default function MediaInput({ onProcess, onProcessBatch, isProcessing }) {
     const [youtubeUrlEnabled, setYoutubeUrlEnabled] = useState(true);
     // File upload is the primary path; the link is secondary.
-    const [mode, setMode] = useState('file'); // 'file' | 'url'
+    const [mode, setMode] = useState('file'); // 'file' | 'url' | 'batch'
+    // Batch: several videos, run one after another with the same options.
+    const [batchUrls, setBatchUrls] = useState('');
+    const [batchFiles, setBatchFiles] = useState([]);
+    const batchLinks = batchUrls.split('\n').map((l) => l.trim()).filter((l) => /^https?:\/\//i.test(l));
+    const batchCount = batchLinks.length + batchFiles.length;
     const [url, setUrl] = useState('');
     const [file, setFile] = useState(null);
     const [fileSeconds, setFileSeconds] = useState(null);
@@ -135,6 +143,18 @@ export default function MediaInput({ onProcess, isProcessing }) {
             localStorage.setItem('os_auto_hook_style_v2', autoHookStyle);
             localStorage.setItem('os_layout', layout);
         } catch { /* ignore */ }
+        if (mode === 'batch') {
+            if (!onProcessBatch || batchCount === 0 || batchCount > MAX_BATCH) return;
+            // One stretch can't apply to many sources, so a batch never sends a range.
+            const shared = { ...advanced, sourceStart: null, sourceEnd: null };
+            onProcessBatch([
+                ...batchLinks.map((l) => ({ type: 'url', payload: l, label: l })),
+                ...batchFiles.map((f) => ({ type: 'file', payload: f, label: f.name })),
+            ].map((it) => ({ ...it, acknowledged: true, outputFormat, ...shared })));
+            setBatchUrls('');
+            setBatchFiles([]);
+            return;
+        }
         if (mode === 'url' && url) {
             onProcess({ type: 'url', payload: url, acknowledged: true, outputFormat, ...advanced });
         } else if (mode === 'file' && file && !fileTooShort) {
@@ -175,10 +195,84 @@ export default function MediaInput({ onProcess, isProcessing }) {
                         Video URL
                     </button>
                 )}
+                {onProcessBatch && (
+                    <button
+                        onClick={() => setMode('batch')}
+                        className={`flex items-center gap-2 pb-3 px-1 -mb-px border-b-2 text-sm lowercase whitespace-nowrap transition-colors ${mode === 'batch'
+                            ? 'text-ink border-brass'
+                            : 'text-muted border-transparent hover:text-ink2'
+                            }`}
+                    >
+                        <Layers size={16} className={`hidden sm:block ${mode === 'batch' ? 'text-brass' : ''}`} />
+                        Batch
+                        {batchCount > 0 && <span className="readout text-brass">{batchCount}</span>}
+                    </button>
+                )}
             </div>
 
             <form onSubmit={handleSubmit}>
-                {mode === 'url' ? (
+                {mode === 'batch' ? (
+                    <div className="space-y-4" data-tutorial="drop-zone">
+                        {youtubeUrlEnabled && (
+                            <textarea
+                                value={batchUrls}
+                                onChange={(e) => setBatchUrls(e.target.value)}
+                                placeholder={'One video link per line\nhttps://...\nhttps://...'}
+                                rows={4}
+                                className="input-field font-mono text-sm"
+                            />
+                        )}
+                        <div
+                            className="border-2 border-dashed border-rule2 hover:border-brass rounded-card p-5 text-center transition-colors"
+                            onDragOver={(e) => e.preventDefault()}
+                            onDrop={(e) => {
+                                e.preventDefault();
+                                const dropped = Array.from(e.dataTransfer.files || []).filter((f) => f.type.startsWith('video/'));
+                                if (dropped.length) setBatchFiles((prev) => [...prev, ...dropped]);
+                            }}
+                        >
+                            <label className="cursor-pointer block">
+                                <input
+                                    type="file"
+                                    accept="video/*"
+                                    multiple
+                                    onChange={(e) => {
+                                        const picked = Array.from(e.target.files || []);
+                                        if (picked.length) setBatchFiles((prev) => [...prev, ...picked]);
+                                        e.target.value = '';
+                                    }}
+                                    className="hidden"
+                                />
+                                <Upload className="mx-auto mb-2 text-muted" size={18} />
+                                <p className="text-ink2 lowercase">Add video files</p>
+                                <p className="readout mt-1">each at least {MIN_SOURCE_SECONDS}s · up to {MAX_BATCH} videos</p>
+                            </label>
+                        </div>
+                        {batchFiles.length > 0 && (
+                            <ul className="space-y-1.5">
+                                {batchFiles.map((f, i) => (
+                                    <li key={`${f.name}-${i}`} className="flex items-center gap-2 text-sm text-ink2 min-w-0">
+                                        <FileVideo size={14} className="shrink-0 text-muted" />
+                                        <span className="truncate">{f.name}</span>
+                                        <button
+                                            type="button"
+                                            aria-label={`Remove ${f.name}`}
+                                            onClick={() => setBatchFiles((prev) => prev.filter((_, j) => j !== i))}
+                                            className="ml-auto p-1 text-muted hover:text-ink hover:bg-paper3 rounded-full transition-colors"
+                                        >
+                                            <X size={14} />
+                                        </button>
+                                    </li>
+                                ))}
+                            </ul>
+                        )}
+                        {batchCount > MAX_BATCH && (
+                            <p className="text-danger text-sm" role="alert">
+                                {batchCount} videos is more than the {MAX_BATCH} a batch can hold. Remove {batchCount - MAX_BATCH}.
+                            </p>
+                        )}
+                    </div>
+                ) : mode === 'url' ? (
                     <div className="space-y-4" data-tutorial="drop-zone">
                         <div className="relative">
                             <input
@@ -259,13 +353,13 @@ export default function MediaInput({ onProcess, isProcessing }) {
                     </div>
                 )}
 
-                <SourceCost
+                {mode !== 'batch' && <SourceCost
                     mode={mode}
                     url={url}
                     fileSeconds={fileSeconds}
                     range={range}
                     onRangeChange={setRange}
-                />
+                />}
 
                 {/* Output format selector */}
                 <div className="mt-5" data-tutorial="output-format">
@@ -419,7 +513,8 @@ export default function MediaInput({ onProcess, isProcessing }) {
                 <button
                     type="submit"
                     data-tutorial="generate"
-                    disabled={isProcessing || !acknowledged || (mode === 'url' && !url) || (mode === 'file' && (!file || fileTooShort))}
+                    disabled={isProcessing || !acknowledged || (mode === 'url' && !url) || (mode === 'file' && (!file || fileTooShort))
+                        || (mode === 'batch' && (batchCount === 0 || batchCount > MAX_BATCH))}
                     className="w-full btn-primary mt-4"
                 >
                     {isProcessing ? (
@@ -429,7 +524,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
                         </>
                     ) : (
                         <>
-                            Generate Clips
+                            {mode === 'batch' ? `Generate clips for ${batchCount || ''} video${batchCount === 1 ? '' : 's'}`.replace('  ', ' ') : 'Generate Clips'}
                         </>
                     )}
                 </button>

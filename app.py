@@ -5959,6 +5959,54 @@ async def remove_subtitles(req: RemoveSubtitlesRequest, request: Request):
     return {"success": True, "new_video_url": new_url}
 
 
+@app.delete("/api/clip/{job_id}/{clip_index}")
+async def delete_clip(job_id: str, clip_index: int, request: Request):
+    """Delete one clip: every rendered version of its file, and mark it deleted.
+
+    The clip stays in the job's list as a ``deleted`` tombstone instead of being
+    removed, so the indices of the other clips (which the editor endpoints,
+    saved project state and durable copies are all keyed by) do not shift.
+    """
+    await _ensure_job_files(job_id, request)
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = jobs[job_id]
+    await _assert_job_owner(request, job)
+    _check_editor_rate(await _owner_id(request))
+
+    output_dir = os.path.join(OUTPUT_DIR, job_id)
+    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+    if not json_files:
+        raise HTTPException(status_code=404, detail="Metadata not found")
+    with open(json_files[0], 'r') as f:
+        data = json.load(f)
+    clips = data.get('shorts', [])
+    if clip_index < 0 or clip_index >= len(clips):
+        raise HTTPException(status_code=404, detail="Clip not found")
+
+    base = os.path.basename((clips[clip_index].get('video_url') or '').split('?')[0])
+    deleted = []
+    if base and base not in (".", ".."):
+        # Derived versions are named <prefix>_<base> (subtitled_, hooked_,
+        # edited_, wm_ ...); each may carry a .layout.json sidecar.
+        for fname in os.listdir(output_dir):
+            stem = fname[:-len(".layout.json")] if fname.endswith(".layout.json") else fname
+            if stem == base or (stem.endswith(f"_{base}") and stem.endswith(".mp4")):
+                try:
+                    os.remove(os.path.join(output_dir, fname))
+                    deleted.append(fname)
+                except OSError:
+                    pass
+
+    clips[clip_index]['deleted'] = True
+    data['shorts'] = clips
+    write_json_atomic(json_files[0], data, indent=4)
+    mem = (job.get('result') or {}).get('clips') or []
+    if clip_index < len(mem):
+        mem[clip_index]['deleted'] = True
+    return {"success": True, "deleted_files": deleted}
+
+
 class HookRequest(BaseModel):
     job_id: str
     clip_index: int

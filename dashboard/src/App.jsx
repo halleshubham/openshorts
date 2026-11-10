@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, Menu, Lock, Rocket } from 'lucide-react';
 import KeyInput from './components/KeyInput';
 import MediaInput from './components/MediaInput';
+import BatchQueue from './components/BatchQueue';
 import McpConnectCard from './components/McpConnectCard';
 import ResultCard from './components/ResultCard';
 import ProcessingAnimation from './components/ProcessingAnimation';
@@ -348,6 +349,9 @@ function App() {
     if (!Array.isArray(clips)) return [];
     return clips
       .map((clip, index) => ({ clip, index }))
+      // Deleted clips stay in the list (tombstones) so the others keep their
+      // index; they just are not shown.
+      .filter(({ clip }) => !clip?.deleted)
       .sort((a, b) => {
         const sa = Number.isFinite(a.clip?.predicted_score) ? a.clip.predicted_score : -1;
         const sb = Number.isFinite(b.clip?.predicted_score) ? b.clip.predicted_score : -1;
@@ -602,6 +606,13 @@ function App() {
     setActiveTab('dashboard');
   };
 
+  // A clip was deleted on the server: mark it, keep every other clip's index.
+  const handleClipDeleted = (index) => {
+    setResults(prev => (prev && Array.isArray(prev.clips)
+      ? { ...prev, clips: prev.clips.map((c, i) => (i === index ? { ...c, deleted: true } : c)) }
+      : prev));
+  };
+
   // Apply one subtitle style to every clip of the job, sequentially.
   const handleBulkSubtitles = async (options) => {
     const clips = results?.clips || [];
@@ -610,6 +621,7 @@ function App() {
     setBulkSub({ running: true, current: 0, total, errors: 0 });
     let errors = 0;
     for (let i = 0; i < total; i++) {
+      if (clips[i]?.deleted) continue;
       setBulkSub({ running: true, current: i + 1, total, errors });
       try {
         const res = await apiFetch('/api/subtitle', {
@@ -1261,6 +1273,124 @@ function App() {
     track('JobResumedAfterSignin', { props: { type: pending.data?.type || 'unknown' } });
     handleProcessRef.current(pending.data);
   }, [billingEnabled, isSignedIn]);
+
+  // --- Batch: several videos, run one after another -----------------------
+  // Each video goes through the normal single-video flow (handleProcess), so the
+  // quota wall, quality gate and login gate all still apply. The batch only
+  // watches that flow: it picks up the job id when it appears, and starts the
+  // next video when this one completes or fails.
+  const [batch, setBatch] = useState({ jobs: [], current: -1, active: false, paused: false });
+  const batchItemsRef = useRef([]); // the payloads (File objects stay out of state)
+
+  const handleProcessBatch = (items) => {
+    if (!items || items.length === 0) return;
+    batchItemsRef.current = items;
+    setBatch({
+      jobs: items.map((it, i) => ({
+        id: i, label: it.label || it.payload?.name || String(it.payload), status: i === 0 ? 'processing' : 'queued',
+        jobId: null, error: '',
+      })),
+      current: 0, active: true, paused: false,
+    });
+    handleProcess(items[0]);
+  };
+
+  const startBatchItem = (index) => {
+    setBatch(b => ({
+      ...b, current: index, paused: false,
+      jobs: b.jobs.map((j, i) => (i === index ? { ...j, status: 'processing' } : j)),
+    }));
+    handleProcessRef.current(batchItemsRef.current[index]);
+  };
+
+  useEffect(() => {
+    if (!batch.active || batch.current < 0) return;
+    const cur = batch.jobs[batch.current];
+    if (!cur) return;
+    // The job id of the video just submitted: the first id this batch has not seen.
+    if (cur.jobId == null && status === 'processing' && jobId
+        && !batch.jobs.some(j => j.jobId === jobId)) {
+      setBatch(b => ({
+        ...b, paused: false,
+        jobs: b.jobs.map((j, i) => (i === b.current ? { ...j, jobId, status: 'processing' } : j)),
+      }));
+      return;
+    }
+    const finished = (cur.jobId && cur.jobId === jobId && (status === 'complete' || status === 'error'))
+      || (cur.jobId == null && status === 'error' && cur.status === 'processing');
+    if (finished) {
+      const failed = status === 'error';
+      const next = batch.current + 1;
+      const last = next >= batch.jobs.length;
+      setBatch(b => ({
+        ...b, active: !last,
+        jobs: b.jobs.map((j, i) => (i === b.current
+          ? { ...j, status: failed ? 'failed' : 'done', error: failed ? (jobError || 'This video failed.') : '' } : j)),
+      }));
+      if (!last) startBatchItem(next);
+      return;
+    }
+    // The submit ended without a job (login, quota wall, quality gate) or the
+    // user left the run: hold the batch until they resume it.
+    if (status === 'idle' && cur.status === 'processing' && !batch.paused) {
+      setBatch(b => ({ ...b, paused: true,
+        jobs: b.jobs.map((j, i) => (i === b.current && j.jobId == null ? { ...j, status: 'paused' } : j)) }));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status, jobId, batch]);
+
+  const resumeBatch = () => {
+    const cur = batch.jobs[batch.current];
+    if (!cur) return;
+    startBatchItem(batch.current);
+  };
+
+  const cancelBatch = () => {
+    setBatch(b => ({
+      ...b, active: false, paused: false,
+      jobs: b.jobs.map((j, i) => (i > b.current && j.status === 'queued' ? { ...j, status: 'cancelled' } : j)),
+    }));
+  };
+
+  const clearBatch = () => {
+    batchItemsRef.current = [];
+    setBatch({ jobs: [], current: -1, active: false, paused: false });
+  };
+
+  // Reopen a finished video of the batch to review its clips.
+  const openBatchJob = async (bj) => {
+    try {
+      const data = await apiJson(`/api/status/${bj.jobId}`);
+      flushClipState();
+      setProjectState(null);
+      setJobId(bj.jobId);
+      setResults(data.result || null);
+      setLogs(data.logs || []);
+      setLogTimes(data.log_times || []);
+      setProcessingMedia(null);
+      setQualityGate(null);
+      setJobError('');
+      setPartialJob(data.partial || null);
+      setStatus('complete');
+      setActiveTab('dashboard');
+    } catch (e) {
+      setBatch(b => ({ ...b, jobs: b.jobs.map(j => (j.id === bj.id
+        ? { ...j, status: 'failed', error: 'These clips are no longer on the server.' } : j)) }));
+    }
+  };
+
+  const batchQueueEl = (
+    <BatchQueue
+      jobs={batch.jobs}
+      active={batch.active}
+      paused={batch.paused}
+      canOpen={!batch.active || batch.paused}
+      onOpen={openBatchJob}
+      onResume={resumeBatch}
+      onCancel={cancelBatch}
+      onClear={clearBatch}
+    />
+  );
 
   const handleReset = () => {
     // Flush any pending edit-state sync before dropping the project: the clips
@@ -2097,7 +2227,8 @@ function App() {
                   )}
                 </div>
 
-                <MediaInput onProcess={handleProcess} isProcessing={status === 'processing'} />
+                {batchQueueEl}
+                <MediaInput onProcess={handleProcess} onProcessBatch={handleProcessBatch} isProcessing={status === 'processing'} />
 
                 <div className="flex flex-wrap items-center justify-center gap-4 sm:gap-8 text-muted text-xs sm:text-sm">
                   <span className="flex items-center gap-2"><Youtube size={16} /> YouTube</span>
@@ -2115,6 +2246,7 @@ function App() {
 
               {/* Left Panel: Preview & Status */}
               <div className={`${status === 'complete' ? 'w-full md:w-[30%] lg:w-[25%]' : 'w-full md:w-[55%] lg:w-[60%]'} md:h-full flex flex-col shrink-0 md:shrink card p-3.5 sm:p-6 md:overflow-y-auto custom-scrollbar transition-all duration-700 ease-in-out`}>
+                {batch.jobs.length > 0 && <div className="mb-4">{batchQueueEl}</div>}
                 <div className="mb-4 sm:mb-6 flex items-center justify-between gap-2">
                   <h2 className="text-sm font-medium text-ink lowercase flex items-center gap-2">
                     <Activity className={`text-brass ${status === 'processing' ? 'animate-pulse' : ''}`} size={18} />
@@ -2238,7 +2370,7 @@ function App() {
                     <span className="mr-auto">Generated Shorts</span>
                     {results?.clips?.length > 0 && (
                       <span className="readout bg-paper3 px-2.5 py-1 rounded-full">
-                        {results.clips.length} Clips
+                        {rankedClips.length} Clips
                       </span>
                     )}
                     {results?.cost_analysis && !isManaged && (
@@ -2259,7 +2391,7 @@ function App() {
                           ? <><Loader2 size={14} className="animate-spin" />zipping…</>
                           : <><Download size={14} />download all</>}
                       </button>
-                      {results.clips.length > 1 && (
+                      {rankedClips.length > 1 && (
                         <button
                           onClick={() => setShowScheduleWeek(true)}
                           className="btn-primary px-4 py-2 text-xs"
@@ -2420,7 +2552,8 @@ function App() {
                           onPlay={(time) => handleClipPlay(time)}
                           onPause={handleClipPause}
                           onBulkSubtitle={handleBulkSubtitles}
-                          clipCount={results.clips.length}
+                          clipCount={rankedClips.length}
+                          onDelete={handleClipDeleted}
                           bulkProgress={bulkSub}
                         />
                       ))}

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Download, Share2, Instagram, Youtube, Video, AlertCircle, Loader2, Copy, Check, Wand2, Type, Calendar, Languages, FileText, Link2, Scissors, Crosshair, TrendingUp } from 'lucide-react';
+import { Download, Share2, Instagram, Youtube, Video, AlertCircle, Loader2, Copy, Check, Wand2, Type, Calendar, Languages, FileText, Link2, Scissors, Crosshair, TrendingUp, Trash2 } from 'lucide-react';
 import { getApiUrl } from '../config';
 import { apiFetch } from '../lib/api';
 import { track } from '../lib/analytics';
@@ -12,6 +12,12 @@ import WatermarkModal, { watermarkNoticeDismissed } from './WatermarkModal';
 import TikTokDraftNotice from './TikTokDraftNotice';
 import { useAuth } from '../contexts/AuthContext';
 import { renderInBrowser } from '../lib/renderInBrowser';
+
+// The server answers with a JSON {detail}; show just the sentence.
+const readableDeleteError = (text) => {
+    try { const d = JSON.parse(text)?.detail; if (typeof d === 'string') return d; } catch { /* plain text */ }
+    return String(text || 'Could not delete this clip.').slice(0, 200);
+};
 
 const QUIET_BTN = 'group flex flex-col items-center justify-center gap-1 py-2.5 sm:py-2 px-1 rounded-input border border-rule hover:bg-paper3 text-[11px] lowercase text-ink2 whitespace-nowrap transition-colors disabled:opacity-45 disabled:cursor-not-allowed';
 
@@ -63,7 +69,7 @@ function formatDuration(clip) {
     return `${String(Math.floor(secs / 60)).padStart(2, '0')}:${String(secs % 60).padStart(2, '0')}`;
 }
 
-export default function ResultCard({ clip, index, jobId, durable, uploadPostKey, uploadUserId, geminiApiKey, elevenLabsKey, isManaged, onPlay, onPause, onBulkSubtitle, clipCount = 1, bulkProgress, initialState = null, onStateChange, connectedPlatforms = null, onConnectSocials, onEditClip = null, onReframeClip = null, onUpgrade = null }) {
+export default function ResultCard({ clip, index, jobId, durable, uploadPostKey, uploadUserId, geminiApiKey, elevenLabsKey, isManaged, onPlay, onPause, onBulkSubtitle, clipCount = 1, bulkProgress, initialState = null, onStateChange, connectedPlatforms = null, onConnectSocials, onEditClip = null, onReframeClip = null, onUpgrade = null, onDelete = null }) {
     const [showModal, setShowModal] = useState(false);
     // The "why" line is clamped to two lines so cards in a row stay level;
     // when it overflows, a hover (desktop) or tap (touch) shows the whole
@@ -238,9 +244,33 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
     const [isSubtitling, setIsSubtitling] = useState(false);
     const [isHooking, setIsHooking] = useState(false);
     const [isTranslating, setIsTranslating] = useState(false);
+    // Two taps to delete: the first arms the button, the second sends it.
+    const [confirmDelete, setConfirmDelete] = useState(false);
+    const [isDeleting, setIsDeleting] = useState(false);
     const [showHookModal, setShowHookModal] = useState(false);
     const [showTranslateModal, setShowTranslateModal] = useState(false);
     const [editError, setEditError] = useState(null);
+
+    const handleDelete = async () => {
+        if (!confirmDelete) {
+            setConfirmDelete(true);
+            // Disarm if the user hesitates, so a stray later tap never deletes.
+            setTimeout(() => setConfirmDelete(false), 4000);
+            return;
+        }
+        setIsDeleting(true);
+        try {
+            const res = await apiFetch(`/api/clip/${jobId}/${index}`, { method: 'DELETE' });
+            if (!res.ok) throw new Error(await res.text());
+            onDelete && onDelete(index);
+        } catch (e) {
+            setEditError(readableDeleteError(e.message));
+            setTimeout(() => setEditError(null), 5000);
+        } finally {
+            setIsDeleting(false);
+            setConfirmDelete(false);
+        }
+    };
 
     const [clipDuration, setClipDuration] = useState(() => {
         const secs = clipDurationSeconds(clip);
@@ -1037,6 +1067,19 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                         <Download size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />
                         {downloadPct === null ? 'download' : `downloading ${downloadPct}%`}
                     </button>
+                    {onDelete && (
+                        <button
+                            onClick={handleDelete}
+                            disabled={isDeleting}
+                            title="Delete this clip's files"
+                            className={`${QUIET_BTN} ${confirmDelete ? '!border-danger !text-danger' : ''}`}
+                        >
+                            {isDeleting
+                                ? <Loader2 size={16} className="animate-spin shrink-0" />
+                                : <Trash2 size={16} className={`shrink-0 transition-colors ${confirmDelete ? 'text-danger' : 'text-muted group-hover:text-danger'}`} />}
+                            {isDeleting ? 'deleting…' : confirmDelete ? 'tap to confirm' : 'delete'}
+                        </button>
+                    )}
                 </div>
             </div>
 
